@@ -371,6 +371,11 @@ function recordsToState(records) {
   };
 }
 
+function latestDataDate(transactions, stockByDate) {
+  const dates = [...transactions.map((t) => t.date), ...Object.keys(stockByDate)].filter(Boolean).sort();
+  return dates[dates.length - 1] || today();
+}
+
 const inputStyle = {
   width: "100%",
   border: "1px solid #d5d7db",
@@ -555,6 +560,10 @@ export default function App() {
   });
 
   const stock = stockByDate[date] || emptyStock(date);
+  const loadedDates = useMemo(
+    () => Array.from(new Set([...Object.keys(stockByDate), ...transactions.map((t) => t.date)])).filter(Boolean).sort().reverse(),
+    [stockByDate, transactions]
+  );
 
   function logout() {
     sessionStorage.removeItem(SESSION_KEY);
@@ -578,6 +587,9 @@ export default function App() {
       setClients(loaded.clients);
       setTransactions(loaded.transactions);
       setStockByDate(loaded.stockByDate);
+      const nextDate = latestDataDate(loaded.transactions, loaded.stockByDate);
+      setDate(nextDate);
+      setExportFilters((prev) => ({ ...prev, from: nextDate, to: nextDate }));
       setSyncState(`Google Sheet connected - ${records.length} rows, ${loaded.clients.length} clients, ${loaded.transactions.length} entries, ${Object.keys(loaded.stockByDate).length} stock days`);
     } catch {
       setSyncState("Google Sheet load failed - local copy active");
@@ -595,6 +607,9 @@ export default function App() {
         setClients(loaded.clients);
         setTransactions(loaded.transactions);
         setStockByDate(loaded.stockByDate);
+        const nextDate = latestDataDate(loaded.transactions, loaded.stockByDate);
+        setDate(nextDate);
+        setExportFilters((prev) => ({ ...prev, from: nextDate, to: nextDate }));
         setSyncState(`Google Sheet connected - ${records.length} rows, ${loaded.clients.length} clients, ${loaded.transactions.length} entries, ${Object.keys(loaded.stockByDate).length} stock days`);
       })
       .catch(() => {
@@ -1070,6 +1085,26 @@ export default function App() {
           <div style={{ marginTop: 10, fontSize: 12, color: "#667085" }}>
             Opening stock is the inventory available for {fmtDate(date)}. Only remaining items carry into the next day.
           </div>
+          {loadedDates.length > 0 && (
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 10 }}>
+              {loadedDates.slice(0, 8).map((d) => (
+                <button
+                  key={d}
+                  onClick={() => setDate(d)}
+                  style={{
+                    ...buttonStyle,
+                    padding: "5px 9px",
+                    fontSize: 12,
+                    background: d === date ? "#101828" : "#fff",
+                    color: d === date ? "#fff" : "#101828",
+                    border: d === date ? "1px solid #101828" : "1px solid #d5d7db",
+                  }}
+                >
+                  {fmtDate(d)}
+                </button>
+              ))}
+            </div>
+          )}
         </Panel>
 
         <section className="stats" style={{ display: "grid", gridTemplateColumns: "repeat(6,1fr)", gap: 10, marginBottom: 12 }}>
