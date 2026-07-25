@@ -32,3 +32,5 @@ VITE_GOOGLE_SHEET_WEBAPP_URL=https://script.google.com/macros/s/YOUR_DEPLOYMENT_
 ```
 
 Then redeploy the app.
+
+The script writes all cloud records into one tab named `Buki Records`.
