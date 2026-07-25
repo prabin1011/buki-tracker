@@ -21,8 +21,12 @@ function uid() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 }
 
+function localDateString(date = new Date()) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
 function today() {
-  return new Date().toISOString().slice(0, 10);
+  return localDateString();
 }
 
 function money(n) {
@@ -64,7 +68,7 @@ function cell(row, names) {
 
 function normalizeExcelDate(value) {
   if (!value) return today();
-  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  if (value instanceof Date) return localDateString(value);
   if (typeof value === "number") {
     const parsed = XLSX.SSF.parse_date_code(value);
     if (parsed) {
@@ -78,7 +82,7 @@ function normalizeExcelDate(value) {
     return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
   }
   const parsed = new Date(text);
-  if (!Number.isNaN(parsed.getTime())) return parsed.toISOString().slice(0, 10);
+  if (!Number.isNaN(parsed.getTime())) return localDateString(parsed);
   return today();
 }
 
@@ -932,7 +936,7 @@ export default function App() {
   async function carryForward() {
     const next = new Date(`${date}T00:00:00`);
     next.setDate(next.getDate() + 1);
-    const nextDate = next.toISOString().slice(0, 10);
+    const nextDate = localDateString(next);
     setStockByDate((prev) => ({
       ...prev,
       [nextDate]: {
