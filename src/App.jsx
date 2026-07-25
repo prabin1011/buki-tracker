@@ -44,8 +44,25 @@ function normalizeName(name) {
   return String(name || "").trim().toLowerCase().replace(/\s+/g, " ");
 }
 
+function cell(row, names) {
+  const keys = Array.isArray(names) ? names : [names];
+  for (const key of keys) {
+    if (row[key] !== undefined && row[key] !== null && row[key] !== "") return row[key];
+  }
+  const normalized = Object.entries(row).reduce((acc, [key, value]) => {
+    acc[normalizeName(key)] = value;
+    return acc;
+  }, {});
+  for (const key of keys) {
+    const value = normalized[normalizeName(key)];
+    if (value !== undefined && value !== null && value !== "") return value;
+  }
+  return "";
+}
+
 function normalizeExcelDate(value) {
   if (!value) return today();
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
   if (typeof value === "number") {
     const parsed = XLSX.SSF.parse_date_code(value);
     if (parsed) {
@@ -54,6 +71,10 @@ function normalizeExcelDate(value) {
   }
   const text = String(value).trim();
   if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
+  if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(text)) {
+    const [month, day, year] = text.split("/");
+    return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+  }
   const parsed = new Date(text);
   if (!Number.isNaN(parsed.getTime())) return parsed.toISOString().slice(0, 10);
   return today();
@@ -288,56 +309,57 @@ function recordsToState(records) {
   const stockMap = {};
 
   records.forEach((row) => {
-    const type = row["Record Type"];
-    if (type === "Client") {
-      const id = row["Client ID"] || row.ID || uid();
+    const type = normalizeName(cell(row, "Record Type"));
+    if (type === "client") {
+      const id = String(cell(row, ["Client ID", "ClientID", "ID"]) || uid());
       clientMap.set(id, {
         id,
-        name: row.Client || "",
-        phone: row.Phone || "",
-        notes: row.Notes || "",
-        joined: normalizeExcelDate(row.Date),
+        name: String(cell(row, ["Client", "Name"]) || ""),
+        phone: String(cell(row, "Phone") || ""),
+        notes: String(cell(row, "Notes") || ""),
+        joined: normalizeExcelDate(cell(row, ["Date", "Joined"])),
       });
     }
   });
 
   records.forEach((row) => {
-    const type = row["Record Type"];
-    if (type === "Transaction") {
-      const clientId = row["Client ID"] || "";
-      if (clientId && !clientMap.has(clientId) && row.Client) {
-        clientMap.set(clientId, { id: clientId, name: row.Client, phone: "", notes: "", joined: normalizeExcelDate(row.Date) });
+    const type = normalizeName(cell(row, "Record Type"));
+    if (type === "transaction") {
+      const clientId = String(cell(row, ["Client ID", "ClientID"]) || "");
+      const clientName = String(cell(row, ["Client", "Name"]) || "");
+      if (clientId && !clientMap.has(clientId) && clientName) {
+        clientMap.set(clientId, { id: clientId, name: clientName, phone: "", notes: "", joined: normalizeExcelDate(cell(row, "Date")) });
       }
-      const id = row.ID || uid();
+      const id = String(cell(row, "ID") || uid());
       transactionMap.set(id, {
         id,
-        date: normalizeExcelDate(row.Date),
+        date: normalizeExcelDate(cell(row, "Date")),
         clientId,
-        clientName: row.Client || clientMap.get(clientId)?.name || "",
-        nauloStick: num(row["Naulo Stick"]),
-        cig: num(row.Cig),
-        nauloStickPrice: num(row["Naulo Stick Price"]) || PRODUCTS[0].defaultPrice,
-        cigPrice: num(row["Cig Price"]) || PRODUCTS[1].defaultPrice,
+        clientName: clientName || clientMap.get(clientId)?.name || "",
+        nauloStick: num(cell(row, "Naulo Stick")),
+        cig: num(cell(row, ["Cig", "Cig Pieces"])),
+        nauloStickPrice: num(cell(row, "Naulo Stick Price")) || PRODUCTS[0].defaultPrice,
+        cigPrice: num(cell(row, "Cig Price")) || PRODUCTS[1].defaultPrice,
         amount:
-          num(row.Amount) ||
-          num(row["Naulo Stick"]) * (num(row["Naulo Stick Price"]) || PRODUCTS[0].defaultPrice) +
-            num(row.Cig) * (num(row["Cig Price"]) || PRODUCTS[1].defaultPrice),
-        paid: row["Payment Status"] !== "Due",
-        method: row["Payment Method"] || "",
-        notes: row.Notes || "",
+          num(cell(row, "Amount")) ||
+          num(cell(row, "Naulo Stick")) * (num(cell(row, "Naulo Stick Price")) || PRODUCTS[0].defaultPrice) +
+            num(cell(row, ["Cig", "Cig Pieces"])) * (num(cell(row, "Cig Price")) || PRODUCTS[1].defaultPrice),
+        paid: normalizeName(cell(row, "Payment Status")) !== "due",
+        method: String(cell(row, "Payment Method") || ""),
+        notes: String(cell(row, "Notes") || ""),
       });
     }
-    if (type === "Daily Summary") {
-      const date = normalizeExcelDate(row.Date);
+    if (type === "daily summary") {
+      const date = normalizeExcelDate(cell(row, "Date"));
       stockMap[date] = {
         date,
-        openingNauloStick: num(row["Opening Naulo Stick"]),
-        nauloStickPrepared: num(row["Prepared Naulo Stick"]),
-        openingCigPieces: num(row["Opening Cig Pieces"] || row["Opening Cig"]),
+        openingNauloStick: num(cell(row, "Opening Naulo Stick")),
+        nauloStickPrepared: num(cell(row, "Prepared Naulo Stick")),
+        openingCigPieces: num(cell(row, ["Opening Cig Pieces", "Opening Cig"])),
         cigPacketsBought:
-          num(row["Cig Packets Bought"]) ||
-          Math.ceil(num(row["Cig Pieces Bought"] || row["Prepared Cig"]) / CIGS_PER_PACKET),
-        notes: row.Notes || "",
+          num(cell(row, "Cig Packets Bought")) ||
+          Math.ceil(num(cell(row, ["Cig Pieces Bought", "Prepared Cig"])) / CIGS_PER_PACKET),
+        notes: String(cell(row, "Notes") || ""),
       };
     }
   });
@@ -517,6 +539,8 @@ export default function App() {
   const [stockByDate, setStockByDate] = useState(initial?.stockByDate || {});
   const [date, setDate] = useState(today());
   const [clientModal, setClientModal] = useState(false);
+  const [editingClientId, setEditingClientId] = useState(null);
+  const [editingTransactionId, setEditingTransactionId] = useState(null);
   const [txForm, setTxForm] = useState(defaultForm());
   const [clientForm, setClientForm] = useState({ name: "", phone: "", notes: "" });
   const [message, setMessage] = useState("");
@@ -554,7 +578,7 @@ export default function App() {
       setClients(loaded.clients);
       setTransactions(loaded.transactions);
       setStockByDate(loaded.stockByDate);
-      setSyncState(`Google Sheet connected - ${records.length} rows loaded`);
+      setSyncState(`Google Sheet connected - ${records.length} rows, ${loaded.clients.length} clients, ${loaded.transactions.length} entries, ${Object.keys(loaded.stockByDate).length} stock days`);
     } catch {
       setSyncState("Google Sheet load failed - local copy active");
       setMessage("Google Sheet load failed. Redeploy Apps Script as a new Web App version and set access to Anyone.");
@@ -571,7 +595,7 @@ export default function App() {
         setClients(loaded.clients);
         setTransactions(loaded.transactions);
         setStockByDate(loaded.stockByDate);
-        setSyncState(`Google Sheet connected - ${records.length} rows loaded`);
+        setSyncState(`Google Sheet connected - ${records.length} rows, ${loaded.clients.length} clients, ${loaded.transactions.length} entries, ${Object.keys(loaded.stockByDate).length} stock days`);
       })
       .catch(() => {
         if (!cancelled) {
@@ -664,17 +688,37 @@ export default function App() {
     }));
   }
 
-  async function addClient() {
+  function openNewClient() {
+    setEditingClientId(null);
+    setClientForm({ name: "", phone: "", notes: "" });
+    setClientModal(true);
+  }
+
+  function openEditClient(client) {
+    setEditingClientId(client.id);
+    setClientForm({ name: client.name || "", phone: client.phone || "", notes: client.notes || "" });
+    setClientModal(true);
+  }
+
+  async function saveClient() {
     if (!clientForm.name.trim()) {
       setMessage("Client name is required.");
       return;
     }
-    const client = { id: uid(), ...clientForm, name: clientForm.name.trim(), joined: today() };
-    setClients((prev) => [...prev, client]);
+    const existing = clients.find((c) => c.id === editingClientId);
+    const client = {
+      id: existing?.id || uid(),
+      ...clientForm,
+      name: clientForm.name.trim(),
+      joined: existing?.joined || today(),
+    };
+    setClients((prev) => (existing ? prev.map((c) => (c.id === client.id ? client : c)) : [...prev, client]));
+    setTransactions((prev) => prev.map((t) => (t.clientId === client.id ? { ...t, clientName: client.name } : t)));
     setTxForm((prev) => ({ ...prev, clientId: client.id }));
     setClientForm({ name: "", phone: "", notes: "" });
+    setEditingClientId(null);
     setClientModal(false);
-    setMessage(`${client.name} added.`);
+    setMessage(existing ? `${client.name} updated.` : `${client.name} added.`);
     try {
       const result = await syncToGoogleSheet({ type: "client", client });
       setSyncState(result.skipped ? "Local export mode" : "Client synced to Google Sheet");
@@ -713,6 +757,62 @@ export default function App() {
     setTransactions((prev) => [record, ...prev]);
     setTxForm((prev) => ({ ...defaultForm(), clientId: prev.clientId }));
     setMessage("Transaction recorded.");
+    try {
+      const result = await syncToGoogleSheet({ type: "transaction", transaction: record });
+      setSyncState(result.skipped ? "Local export mode" : "Transaction synced to Google Sheet");
+    } catch {
+      setSyncState("Google Sheets sync failed");
+    }
+  }
+
+  function openEditTransaction(transaction) {
+    setEditingTransactionId(transaction.id);
+    setTxForm({
+      clientId: transaction.clientId,
+      nauloStick: transaction.nauloStick,
+      cig: transaction.cig,
+      nauloStickPrice: transaction.nauloStickPrice,
+      cigPrice: transaction.cigPrice,
+      paid: transaction.paid,
+      method: transaction.method || PAYMENT_METHODS[0],
+      notes: transaction.notes || "",
+    });
+    setDate(transaction.date);
+  }
+
+  async function saveTransaction() {
+    const client = clients.find((c) => c.id === txForm.clientId);
+    if (!client) {
+      setMessage("Choose a client first.");
+      return;
+    }
+    const nauloStick = Math.max(0, num(txForm.nauloStick));
+    const cig = Math.max(0, num(txForm.cig));
+    if (nauloStick + cig <= 0) {
+      setMessage("Add at least one item.");
+      return;
+    }
+    const record = {
+      id: editingTransactionId || uid(),
+      date,
+      clientId: client.id,
+      clientName: client.name,
+      nauloStick,
+      cig,
+      nauloStickPrice: num(txForm.nauloStickPrice),
+      cigPrice: num(txForm.cigPrice),
+      paid: Boolean(txForm.paid),
+      method: txForm.paid ? txForm.method : "",
+      amount: nauloStick * num(txForm.nauloStickPrice) + cig * num(txForm.cigPrice),
+      notes: txForm.notes,
+    };
+    setTransactions((prev) =>
+      editingTransactionId ? prev.map((t) => (t.id === editingTransactionId ? record : t)) : [record, ...prev]
+    );
+    setTransactionModalOpen(false);
+    setEditingTransactionId(null);
+    setTxForm((prev) => ({ ...defaultForm(), clientId: prev.clientId }));
+    setMessage(editingTransactionId ? "Transaction updated." : "Transaction recorded.");
     try {
       const result = await syncToGoogleSheet({ type: "transaction", transaction: record });
       setSyncState(result.skipped ? "Local export mode" : "Transaction synced to Google Sheet");
@@ -848,7 +948,7 @@ export default function App() {
       `}</style>
 
       {clientModal && (
-        <Modal title="New Client" onClose={() => setClientModal(false)}>
+        <Modal title={editingClientId ? "Edit Client" : "New Client"} onClose={() => setClientModal(false)}>
           <div style={{ display: "grid", gap: 12 }}>
             <Field label="Client name">
               <input style={inputStyle} value={clientForm.name} onChange={(e) => setClientForm((p) => ({ ...p, name: e.target.value }))} />
@@ -859,8 +959,8 @@ export default function App() {
             <Field label="Notes">
               <textarea style={{ ...inputStyle, minHeight: 70, resize: "vertical" }} value={clientForm.notes} onChange={(e) => setClientForm((p) => ({ ...p, notes: e.target.value }))} />
             </Field>
-            <button onClick={addClient} style={{ ...buttonStyle, background: "#101828", color: "#fff" }}>
-              Add Client
+            <button onClick={saveClient} style={{ ...buttonStyle, background: "#101828", color: "#fff" }}>
+              {editingClientId ? "Save Client" : "Add Client"}
             </button>
           </div>
         </Modal>
@@ -999,13 +1099,17 @@ export default function App() {
             <Stat label="Opening cig pieces left" value={daily.openingCigRemaining} tone={daily.openingCigRemaining < 0 ? "bad" : "dark"} />
             <Stat label="Bought cig pieces left" value={daily.preparedCigRemaining} tone={daily.preparedCigRemaining < 0 ? "bad" : "dark"} />
           </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 10, marginTop: 10 }} className="stats">
+            <Stat label="Stick deficit" value={Math.max(0, -daily.remainingNauloStick)} tone={daily.remainingNauloStick < 0 ? "bad" : "dark"} />
+            <Stat label="Cig pieces deficit" value={Math.max(0, -daily.remainingCig)} tone={daily.remainingCig < 0 ? "bad" : "dark"} />
+          </div>
         </Panel>
 
         <main className="layout" style={{ display: "grid", gridTemplateColumns: "360px 1fr", gap: 12, alignItems: "start" }}>
           <section style={{ background: "#fff", border: "1px solid #eaecf0", borderRadius: 8, padding: 14 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
               <strong>Record Transaction</strong>
-              <button onClick={() => setClientModal(true)} style={{ ...buttonStyle, background: "#f9fafb", color: "#101828", border: "1px solid #d5d7db", padding: "7px 10px" }}>
+              <button onClick={openNewClient} style={{ ...buttonStyle, background: "#f9fafb", color: "#101828", border: "1px solid #d5d7db", padding: "7px 10px" }}>
                 New Client
               </button>
             </div>
@@ -1057,9 +1161,22 @@ export default function App() {
               <div style={{ background: "#f9fafb", border: "1px solid #eaecf0", borderRadius: 8, padding: 10, fontSize: 13 }}>
                 Total: <strong>{money(num(txForm.nauloStick) * num(txForm.nauloStickPrice) + num(txForm.cig) * num(txForm.cigPrice))}</strong>
               </div>
-              <button onClick={addTransaction} style={{ ...buttonStyle, background: "#101828", color: "#fff", padding: 12 }}>
-                Record for {fmtDate(date)}
-              </button>
+              <div style={{ display: "grid", gridTemplateColumns: editingTransactionId ? "1fr auto" : "1fr", gap: 8 }}>
+                <button onClick={saveTransaction} style={{ ...buttonStyle, background: "#101828", color: "#fff", padding: 12 }}>
+                  {editingTransactionId ? "Update Transaction" : `Record for ${fmtDate(date)}`}
+                </button>
+                {editingTransactionId && (
+                  <button
+                    onClick={() => {
+                      setEditingTransactionId(null);
+                      setTxForm(defaultForm());
+                    }}
+                    style={{ ...buttonStyle, background: "#fff", color: "#667085", border: "1px solid #d5d7db" }}
+                  >
+                    Cancel
+                  </button>
+                )}
+              </div>
             </div>
           </section>
 
@@ -1078,12 +1195,13 @@ export default function App() {
                       <th>Amount</th>
                       <th>Payment</th>
                       <th>Notes</th>
+                      <th>Action</th>
                     </tr>
                   </thead>
                   <tbody>
                     {dayTransactions.length === 0 ? (
                       <tr>
-                        <td colSpan="5" style={{ color: "#667085", textAlign: "center", padding: 28 }}>
+                        <td colSpan="6" style={{ color: "#667085", textAlign: "center", padding: 28 }}>
                           No transactions recorded for this day.
                         </td>
                       </tr>
@@ -1106,6 +1224,11 @@ export default function App() {
                             </button>
                           </td>
                           <td style={{ color: "#667085" }}>{t.notes || "-"}</td>
+                          <td>
+                            <button onClick={() => openEditTransaction(t)} style={{ ...buttonStyle, background: "#f9fafb", color: "#101828", border: "1px solid #d5d7db", padding: "5px 9px" }}>
+                              Edit
+                            </button>
+                          </td>
                         </tr>
                       ))
                     )}
@@ -1130,11 +1253,16 @@ export default function App() {
                             <strong>{c.name}</strong>
                             <span style={{ color: "#667085", display: "block", fontSize: 12 }}>{c.phone || "No phone"}</span>
                           </span>
-                          <span style={{ textAlign: "right", fontSize: 12, color: "#667085" }}>
-                            {visits} visits
-                            <br />
-                            {lastVisit ? fmtDate(lastVisit) : "Never"}
-                          </span>
+                          <div style={{ textAlign: "right", fontSize: 12, color: "#667085", display: "grid", gap: 4, justifyItems: "end" }}>
+                            <span>
+                              {visits} visits
+                              <br />
+                              {lastVisit ? fmtDate(lastVisit) : "Never"}
+                            </span>
+                            <button onClick={() => openEditClient(c)} style={{ ...buttonStyle, background: "#f9fafb", color: "#101828", border: "1px solid #d5d7db", padding: "4px 8px", fontSize: 11 }}>
+                              Edit
+                            </button>
+                          </div>
                         </div>
                       );
                     })

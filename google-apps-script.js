@@ -54,6 +54,12 @@ function getSheet() {
     sheet.getRange(1, recordTypeColumn + 1).setValue("Unique Key");
     currentHeaders = sheet.getRange(1, 1, 1, Math.max(sheet.getLastColumn(), HEADERS.length)).getValues()[0];
   }
+  if (!currentHeaders.includes("Cig Pieces Bought") && currentHeaders.includes("Cig Packets Bought")) {
+    const packetsColumn = currentHeaders.indexOf("Cig Packets Bought") + 1;
+    sheet.insertColumnAfter(packetsColumn);
+    sheet.getRange(1, packetsColumn + 1).setValue("Cig Pieces Bought");
+    currentHeaders = sheet.getRange(1, 1, 1, Math.max(sheet.getLastColumn(), HEADERS.length)).getValues()[0];
+  }
 
   sheet.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS]);
   backfillUniqueKeys(sheet);
