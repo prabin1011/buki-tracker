@@ -33,6 +33,10 @@ const HEADERS = [
   "Paid",
   "Due",
   "Notes",
+  "Pool Hours",
+  "Pool Frames",
+  "Pool Hour Price",
+  "Pool Frame Price",
 ];
 
 function getSheet() {
@@ -133,6 +137,12 @@ function upsertRecord(record) {
   }
 }
 
+function deleteRecord(uniqueKey) {
+  const sheet = getSheet();
+  const existingRow = findRowByKey(sheet, uniqueKey);
+  if (existingRow !== -1) sheet.deleteRow(existingRow);
+}
+
 function sendJson(data, callback) {
   const json = JSON.stringify(data);
   if (callback) {
@@ -180,11 +190,19 @@ function doPost(e) {
       "Cig": t.cig,
       "Naulo Stick Price": t.nauloStickPrice,
       "Cig Price": t.cigPrice,
+      "Pool Hours": t.poolHours,
+      "Pool Frames": t.poolFrames,
+      "Pool Hour Price": t.poolHourlyPrice,
+      "Pool Frame Price": t.poolFramePrice,
       "Amount": t.amount,
       "Payment Status": t.paid ? "Paid" : "Due",
       "Payment Method": t.method,
       "Notes": t.notes,
     });
+  }
+
+  if (payload.type === "delete_transaction") {
+    deleteRecord(`Transaction:${payload.id}`);
   }
 
   if (payload.type === "daily_summary") {

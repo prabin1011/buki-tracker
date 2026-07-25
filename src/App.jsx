@@ -14,6 +14,8 @@ const PRODUCTS = [
   { key: "cig", label: "Cig", unit: "cig", defaultPrice: 30 },
 ];
 const CIGS_PER_PACKET = 20;
+const POOL_HOURLY_PRICE = 300;
+const POOL_FRAME_PRICE = 100;
 
 function uid() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
@@ -108,11 +110,56 @@ function defaultForm() {
     clientId: "",
     nauloStick: 0,
     cig: 0,
+    poolHours: 0,
+    poolFrames: 0,
     nauloStickPrice: PRODUCTS[0].defaultPrice,
     cigPrice: PRODUCTS[1].defaultPrice,
+    poolHourlyPrice: POOL_HOURLY_PRICE,
+    poolFramePrice: POOL_FRAME_PRICE,
     paid: true,
     method: PAYMENT_METHODS[0],
     notes: "",
+  };
+}
+
+function transactionAmount(form) {
+  return (
+    num(form.nauloStick) * num(form.nauloStickPrice) +
+    num(form.cig) * num(form.cigPrice) +
+    num(form.poolHours) * num(form.poolHourlyPrice) +
+    num(form.poolFrames) * num(form.poolFramePrice)
+  );
+}
+
+function calculateDaily(stock, rows) {
+  const soldNauloStick = rows.reduce((sum, t) => sum + num(t.nauloStick), 0);
+  const soldCig = rows.reduce((sum, t) => sum + num(t.cig), 0);
+  const sales = rows.reduce((sum, t) => sum + num(t.amount), 0);
+  const paid = rows.filter((t) => t.paid).reduce((sum, t) => sum + num(t.amount), 0);
+  const openingNauloStickRemaining = num(stock.openingNauloStick) - soldNauloStick;
+  const preparedNauloStickRemaining = Math.max(0, num(stock.nauloStickPrepared) - num(stock.openingNauloStick));
+  const openingCigRemaining = cigOpeningPieces(stock) - soldCig;
+  const preparedCigRemaining = Math.max(0, cigBoughtPieces(stock) - cigOpeningPieces(stock));
+  const remainingNauloStick = openingNauloStickRemaining + preparedNauloStickRemaining;
+  const remainingCig = openingCigRemaining + preparedCigRemaining;
+
+  return {
+    soldNauloStick,
+    soldCig,
+    sales,
+    paid,
+    due: sales - paid,
+    openingNauloStickUsed: soldNauloStick,
+    preparedNauloStickUsed: 0,
+    openingCigUsed: soldCig,
+    preparedCigUsed: 0,
+    openingNauloStickRemaining,
+    preparedNauloStickRemaining,
+    openingCigRemaining,
+    preparedCigRemaining,
+    cigPiecesBought: cigBoughtPieces(stock),
+    remainingNauloStick,
+    remainingCig,
   };
 }
 
@@ -153,6 +200,10 @@ function buildWorkbook(clients, transactions, stockRows) {
         "Cig",
         "Naulo Stick Price",
         "Cig Price",
+        "Pool Hours",
+        "Pool Frames",
+        "Pool Hour Price",
+        "Pool Frame Price",
         "Amount",
         "Payment Status",
         "Payment Method",
@@ -167,6 +218,10 @@ function buildWorkbook(clients, transactions, stockRows) {
         t.cig,
         t.nauloStickPrice,
         t.cigPrice,
+        t.poolHours || 0,
+        t.poolFrames || 0,
+        t.poolHourlyPrice || POOL_HOURLY_PRICE,
+        t.poolFramePrice || POOL_FRAME_PRICE,
         t.amount,
         t.paid ? "Paid" : "Due",
         t.paid ? t.method : "",
@@ -338,12 +393,18 @@ function recordsToState(records) {
         clientName: clientName || clientMap.get(clientId)?.name || "",
         nauloStick: num(cell(row, "Naulo Stick")),
         cig: num(cell(row, ["Cig", "Cig Pieces"])),
+        poolHours: num(cell(row, "Pool Hours")),
+        poolFrames: num(cell(row, "Pool Frames")),
         nauloStickPrice: num(cell(row, "Naulo Stick Price")) || PRODUCTS[0].defaultPrice,
         cigPrice: num(cell(row, "Cig Price")) || PRODUCTS[1].defaultPrice,
+        poolHourlyPrice: num(cell(row, "Pool Hour Price")) || POOL_HOURLY_PRICE,
+        poolFramePrice: num(cell(row, "Pool Frame Price")) || POOL_FRAME_PRICE,
         amount:
           num(cell(row, "Amount")) ||
           num(cell(row, "Naulo Stick")) * (num(cell(row, "Naulo Stick Price")) || PRODUCTS[0].defaultPrice) +
-            num(cell(row, ["Cig", "Cig Pieces"])) * (num(cell(row, "Cig Price")) || PRODUCTS[1].defaultPrice),
+            num(cell(row, ["Cig", "Cig Pieces"])) * (num(cell(row, "Cig Price")) || PRODUCTS[1].defaultPrice) +
+            num(cell(row, "Pool Hours")) * (num(cell(row, "Pool Hour Price")) || POOL_HOURLY_PRICE) +
+            num(cell(row, "Pool Frames")) * (num(cell(row, "Pool Frame Price")) || POOL_FRAME_PRICE),
         paid: normalizeName(cell(row, "Payment Status")) !== "due",
         method: String(cell(row, "Payment Method") || ""),
         notes: String(cell(row, "Notes") || ""),
@@ -360,6 +421,7 @@ function recordsToState(records) {
           num(cell(row, "Cig Packets Bought")) ||
           Math.ceil(num(cell(row, ["Cig Pieces Bought", "Prepared Cig"])) / CIGS_PER_PACKET),
         notes: String(cell(row, "Notes") || ""),
+        saved: true,
       };
     }
   });
@@ -558,8 +620,10 @@ export default function App() {
     payment: "All",
     recordType: "All",
   });
+  const [editingStockDate, setEditingStockDate] = useState(null);
 
   const stock = stockByDate[date] || emptyStock(date);
+  const stockLocked = Boolean(stock.saved) && editingStockDate !== date;
   const loadedDates = useMemo(
     () => Array.from(new Set([...Object.keys(stockByDate), ...transactions.map((t) => t.date)])).filter(Boolean).sort().reverse(),
     [stockByDate, transactions]
@@ -626,37 +690,7 @@ export default function App() {
   const dayTransactions = useMemo(() => transactions.filter((t) => t.date === date), [transactions, date]);
 
   const daily = useMemo(() => {
-    const soldNauloStick = dayTransactions.reduce((sum, t) => sum + num(t.nauloStick), 0);
-    const soldCig = dayTransactions.reduce((sum, t) => sum + num(t.cig), 0);
-    const sales = dayTransactions.reduce((sum, t) => sum + num(t.amount), 0);
-    const paid = dayTransactions.filter((t) => t.paid).reduce((sum, t) => sum + num(t.amount), 0);
-    const due = sales - paid;
-    const openingNauloStickUsed = Math.min(num(stock.openingNauloStick), soldNauloStick);
-    const preparedNauloStickUsed = Math.max(0, soldNauloStick - openingNauloStickUsed);
-    const openingCigUsed = Math.min(cigOpeningPieces(stock), soldCig);
-    const preparedCigUsed = Math.max(0, soldCig - openingCigUsed);
-    const openingNauloStickRemaining = num(stock.openingNauloStick) - openingNauloStickUsed;
-    const preparedNauloStickRemaining = num(stock.nauloStickPrepared) - preparedNauloStickUsed;
-    const openingCigRemaining = cigOpeningPieces(stock) - openingCigUsed;
-    const preparedCigRemaining = cigBoughtPieces(stock) - preparedCigUsed;
-    return {
-      soldNauloStick,
-      soldCig,
-      sales,
-      paid,
-      due,
-      openingNauloStickUsed,
-      preparedNauloStickUsed,
-      openingCigUsed,
-      preparedCigUsed,
-      openingNauloStickRemaining,
-      preparedNauloStickRemaining,
-      openingCigRemaining,
-      preparedCigRemaining,
-      cigPiecesBought: cigBoughtPieces(stock),
-      remainingNauloStick: openingNauloStickRemaining + preparedNauloStickRemaining,
-      remainingCig: openingCigRemaining + preparedCigRemaining,
-    };
+    return calculateDaily(stock, dayTransactions);
   }, [dayTransactions, stock]);
 
   const allStockRows = useMemo(() => {
@@ -664,34 +698,13 @@ export default function App() {
     return dates.map((d) => {
       const row = stockByDate[d] || emptyStock(d);
       const rows = transactions.filter((t) => t.date === d);
-      const soldNauloStick = rows.reduce((sum, t) => sum + num(t.nauloStick), 0);
-      const soldCig = rows.reduce((sum, t) => sum + num(t.cig), 0);
-      const sales = rows.reduce((sum, t) => sum + num(t.amount), 0);
-      const paid = rows.filter((t) => t.paid).reduce((sum, t) => sum + num(t.amount), 0);
-      const openingNauloStickUsed = Math.min(num(row.openingNauloStick), soldNauloStick);
-      const preparedNauloStickUsed = Math.max(0, soldNauloStick - openingNauloStickUsed);
-      const openingCigUsed = Math.min(cigOpeningPieces(row), soldCig);
-      const preparedCigUsed = Math.max(0, soldCig - openingCigUsed);
-      const openingNauloStickRemaining = num(row.openingNauloStick) - openingNauloStickUsed;
-      const preparedNauloStickRemaining = num(row.nauloStickPrepared) - preparedNauloStickUsed;
-      const openingCigRemaining = cigOpeningPieces(row) - openingCigUsed;
-      const preparedCigRemaining = cigBoughtPieces(row) - preparedCigUsed;
+      const rowDaily = calculateDaily(row, rows);
       return {
         ...row,
-        soldNauloStick,
-        soldCig,
-        sales,
-        paid,
-        due: sales - paid,
-        openingNauloStickRemaining,
-        preparedNauloStickRemaining,
-        remainingNauloStick: openingNauloStickRemaining + preparedNauloStickRemaining,
-        openingCigRemaining,
-        preparedCigRemaining,
         openingCigPieces: cigOpeningPieces(row),
         cigPacketsBought: cigBoughtPackets(row),
         cigPiecesBought: cigBoughtPieces(row),
-        remainingCig: openingCigRemaining + preparedCigRemaining,
+        ...rowDaily,
       };
     });
   }, [stockByDate, transactions]);
@@ -750,11 +763,12 @@ export default function App() {
     }
     const nauloStick = Math.max(0, num(txForm.nauloStick));
     const cig = Math.max(0, num(txForm.cig));
-    if (nauloStick + cig <= 0) {
+    const poolHours = Math.max(0, num(txForm.poolHours));
+    const poolFrames = Math.max(0, num(txForm.poolFrames));
+    if (nauloStick + cig + poolHours + poolFrames <= 0) {
       setMessage("Add at least one item.");
       return;
     }
-    const amount = nauloStick * num(txForm.nauloStickPrice) + cig * num(txForm.cigPrice);
     const record = {
       id: uid(),
       date,
@@ -762,15 +776,19 @@ export default function App() {
       clientName: client.name,
       nauloStick,
       cig,
+      poolHours,
+      poolFrames,
       nauloStickPrice: num(txForm.nauloStickPrice),
       cigPrice: num(txForm.cigPrice),
+      poolHourlyPrice: num(txForm.poolHourlyPrice),
+      poolFramePrice: num(txForm.poolFramePrice),
       paid: Boolean(txForm.paid),
       method: txForm.paid ? txForm.method : "",
-      amount,
+      amount: transactionAmount({ ...txForm, nauloStick, cig, poolHours, poolFrames }),
       notes: txForm.notes,
     };
     setTransactions((prev) => [record, ...prev]);
-    setTxForm((prev) => ({ ...defaultForm(), clientId: prev.clientId }));
+    setTxForm(defaultForm());
     setMessage("Transaction recorded.");
     try {
       const result = await syncToGoogleSheet({ type: "transaction", transaction: record });
@@ -786,8 +804,12 @@ export default function App() {
       clientId: transaction.clientId,
       nauloStick: transaction.nauloStick,
       cig: transaction.cig,
+      poolHours: transaction.poolHours || 0,
+      poolFrames: transaction.poolFrames || 0,
       nauloStickPrice: transaction.nauloStickPrice,
       cigPrice: transaction.cigPrice,
+      poolHourlyPrice: transaction.poolHourlyPrice || POOL_HOURLY_PRICE,
+      poolFramePrice: transaction.poolFramePrice || POOL_FRAME_PRICE,
       paid: transaction.paid,
       method: transaction.method || PAYMENT_METHODS[0],
       notes: transaction.notes || "",
@@ -803,7 +825,9 @@ export default function App() {
     }
     const nauloStick = Math.max(0, num(txForm.nauloStick));
     const cig = Math.max(0, num(txForm.cig));
-    if (nauloStick + cig <= 0) {
+    const poolHours = Math.max(0, num(txForm.poolHours));
+    const poolFrames = Math.max(0, num(txForm.poolFrames));
+    if (nauloStick + cig + poolHours + poolFrames <= 0) {
       setMessage("Add at least one item.");
       return;
     }
@@ -814,25 +838,46 @@ export default function App() {
       clientName: client.name,
       nauloStick,
       cig,
+      poolHours,
+      poolFrames,
       nauloStickPrice: num(txForm.nauloStickPrice),
       cigPrice: num(txForm.cigPrice),
+      poolHourlyPrice: num(txForm.poolHourlyPrice),
+      poolFramePrice: num(txForm.poolFramePrice),
       paid: Boolean(txForm.paid),
       method: txForm.paid ? txForm.method : "",
-      amount: nauloStick * num(txForm.nauloStickPrice) + cig * num(txForm.cigPrice),
+      amount: transactionAmount({ ...txForm, nauloStick, cig, poolHours, poolFrames }),
       notes: txForm.notes,
     };
     setTransactions((prev) =>
       editingTransactionId ? prev.map((t) => (t.id === editingTransactionId ? record : t)) : [record, ...prev]
     );
-    setTransactionModalOpen(false);
     setEditingTransactionId(null);
-    setTxForm((prev) => ({ ...defaultForm(), clientId: prev.clientId }));
+    setTxForm(defaultForm());
     setMessage(editingTransactionId ? "Transaction updated." : "Transaction recorded.");
     try {
       const result = await syncToGoogleSheet({ type: "transaction", transaction: record });
       setSyncState(result.skipped ? "Local export mode" : "Transaction synced to Google Sheet");
     } catch {
       setSyncState("Google Sheets sync failed");
+    }
+  }
+
+  async function deleteTransaction(id) {
+    const target = transactions.find((t) => t.id === id);
+    if (!target) return;
+    setTransactions((prev) => prev.filter((t) => t.id !== id));
+    if (editingTransactionId === id) {
+      setEditingTransactionId(null);
+      setTxForm(defaultForm());
+    }
+    setMessage("Transaction deleted.");
+    try {
+      const result = await syncToGoogleSheet({ type: "delete_transaction", id });
+      setSyncState(result.skipped ? "Local export mode" : "Transaction deleted from Google Sheet");
+    } catch {
+      setSyncState("Google Sheets delete failed");
+      setMessage("Deleted locally. Click Save Excel after updating Apps Script to remove it from Google Sheet.");
     }
   }
 
@@ -864,14 +909,20 @@ export default function App() {
   }
 
   async function saveDayStock() {
+    const savedStock = { ...emptyStock(date), ...stock, saved: true };
+    setStockByDate((prev) => ({
+      ...prev,
+      [date]: savedStock,
+    }));
     setMessage(`Saving stock for ${fmtDate(date)}...`);
     try {
       const result = await syncToGoogleSheet({
         type: "daily_summary",
-        summary: currentDailySummary(),
+        summary: { ...currentDailySummary(), ...savedStock },
       });
       setSyncState(result.skipped ? "Local export mode" : "Stock day saved to Google Sheet");
       setMessage(`Stock for ${fmtDate(date)} saved.`);
+      setEditingStockDate(null);
     } catch {
       setSyncState("Google Sheet sync failed");
       setMessage("Could not save day stock. Check Apps Script deployment and access.");
@@ -889,6 +940,7 @@ export default function App() {
         ...(prev[nextDate] || {}),
         openingNauloStick: num(prev[nextDate]?.openingNauloStick) + Math.max(0, daily.remainingNauloStick),
         openingCigPieces: cigOpeningPieces(prev[nextDate] || {}) + Math.max(0, daily.remainingCig),
+        saved: false,
       },
     }));
     setDate(nextDate);
@@ -1066,24 +1118,30 @@ export default function App() {
             </Field>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 10 }} className="formgrid">
               <Field label="Opening Naulo Stick">
-                <NumberInput style={inputStyle} value={stock.openingNauloStick} onChange={(value) => updateStock("openingNauloStick", value)} />
+                <NumberInput disabled={stockLocked} style={{ ...inputStyle, background: stockLocked ? "#f9fafb" : "#fff" }} value={stock.openingNauloStick} onChange={(value) => updateStock("openingNauloStick", value)} />
               </Field>
               <Field label="Prepared Naulo Stick">
-                <NumberInput style={inputStyle} value={stock.nauloStickPrepared} onChange={(value) => updateStock("nauloStickPrepared", value)} />
+                <NumberInput disabled={stockLocked} style={{ ...inputStyle, background: stockLocked ? "#f9fafb" : "#fff" }} value={stock.nauloStickPrepared} onChange={(value) => updateStock("nauloStickPrepared", value)} />
               </Field>
               <Field label="Opening Cig">
-                <NumberInput style={inputStyle} value={cigOpeningPieces(stock)} onChange={(value) => updateStock("openingCigPieces", value)} />
+                <NumberInput disabled={stockLocked} style={{ ...inputStyle, background: stockLocked ? "#f9fafb" : "#fff" }} value={cigOpeningPieces(stock)} onChange={(value) => updateStock("openingCigPieces", value)} />
               </Field>
               <Field label="Cig packets bought">
-                <NumberInput style={inputStyle} value={cigBoughtPackets(stock)} onChange={(value) => updateStock("cigPacketsBought", value)} />
+                <NumberInput disabled={stockLocked} style={{ ...inputStyle, background: stockLocked ? "#f9fafb" : "#fff" }} value={cigBoughtPackets(stock)} onChange={(value) => updateStock("cigPacketsBought", value)} />
               </Field>
             </div>
-            <button onClick={saveDayStock} style={{ ...buttonStyle, background: "#101828", color: "#fff" }}>
-              Save Day Stock
-            </button>
+            {stockLocked ? (
+              <button onClick={() => setEditingStockDate(date)} style={{ ...buttonStyle, background: "#fff", color: "#101828", border: "1px solid #d5d7db" }}>
+                Edit Day Stock
+              </button>
+            ) : (
+              <button onClick={saveDayStock} style={{ ...buttonStyle, background: "#101828", color: "#fff" }}>
+                {stock.saved ? "Update Day Stock" : "Save Day Stock"}
+              </button>
+            )}
           </div>
           <div style={{ marginTop: 10, fontSize: 12, color: "#667085" }}>
-            Opening stock is the inventory available for {fmtDate(date)}. Only remaining items carry into the next day.
+            Opening stock is what you sell on {fmtDate(date)}. Prepared/bought stock stays separate for leftover counting.
           </div>
           {loadedDates.length > 0 && (
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 10 }}>
@@ -1121,7 +1179,7 @@ export default function App() {
             <div>
               <strong>Remaining Stock</strong>
               <div style={{ fontSize: 12, color: "#667085", marginTop: 4 }}>
-                Daily sales for {fmtDate(date)} consume opening stock first, then bought/prepared stock.
+                Daily sales for {fmtDate(date)} consume opening stock only. Prepared/bought stock stays separate until carried forward.
               </div>
             </div>
             <button onClick={carryForward} style={{ ...buttonStyle, background: "#eef4ff", color: "#3538cd", border: "1px solid #c7d7fe" }}>
@@ -1168,11 +1226,27 @@ export default function App() {
                 </Field>
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <Field label="Pool hours">
+                  <NumberInput style={inputStyle} value={txForm.poolHours} onChange={(value) => setTxForm((p) => ({ ...p, poolHours: value }))} />
+                </Field>
+                <Field label="Pool frames">
+                  <NumberInput style={inputStyle} value={txForm.poolFrames} onChange={(value) => setTxForm((p) => ({ ...p, poolFrames: value }))} />
+                </Field>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                 <Field label="Stick price">
                   <NumberInput style={inputStyle} value={txForm.nauloStickPrice} onChange={(value) => setTxForm((p) => ({ ...p, nauloStickPrice: value }))} />
                 </Field>
                 <Field label="Cig price">
                   <NumberInput style={inputStyle} value={txForm.cigPrice} onChange={(value) => setTxForm((p) => ({ ...p, cigPrice: value }))} />
+                </Field>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <Field label="Pool hourly price">
+                  <NumberInput style={inputStyle} value={txForm.poolHourlyPrice} onChange={(value) => setTxForm((p) => ({ ...p, poolHourlyPrice: value }))} />
+                </Field>
+                <Field label="Pool frame price">
+                  <NumberInput style={inputStyle} value={txForm.poolFramePrice} onChange={(value) => setTxForm((p) => ({ ...p, poolFramePrice: value }))} />
                 </Field>
               </div>
               <Field label="Payment">
@@ -1194,7 +1268,7 @@ export default function App() {
                 <textarea style={{ ...inputStyle, resize: "vertical", minHeight: 72 }} value={txForm.notes} onChange={(e) => setTxForm((p) => ({ ...p, notes: e.target.value }))} />
               </Field>
               <div style={{ background: "#f9fafb", border: "1px solid #eaecf0", borderRadius: 8, padding: 10, fontSize: 13 }}>
-                Total: <strong>{money(num(txForm.nauloStick) * num(txForm.nauloStickPrice) + num(txForm.cig) * num(txForm.cigPrice))}</strong>
+                Total: <strong>{money(transactionAmount(txForm))}</strong>
               </div>
               <div style={{ display: "grid", gridTemplateColumns: editingTransactionId ? "1fr auto" : "1fr", gap: 8 }}>
                 <button onClick={saveTransaction} style={{ ...buttonStyle, background: "#101828", color: "#fff", padding: 12 }}>
@@ -1247,8 +1321,22 @@ export default function App() {
                             <strong>{t.clientName}</strong>
                           </td>
                           <td>
-                            {t.nauloStick} Naulo Stick<br />
-                            {t.cig} Cig pieces
+                            {num(t.nauloStick) > 0 && (
+                              <>
+                                {t.nauloStick} Naulo Stick<br />
+                              </>
+                            )}
+                            {num(t.cig) > 0 && (
+                              <>
+                                {t.cig} Cig pieces<br />
+                              </>
+                            )}
+                            {num(t.poolHours) > 0 && (
+                              <>
+                                {t.poolHours} Pool hour{num(t.poolHours) === 1 ? "" : "s"}<br />
+                              </>
+                            )}
+                            {num(t.poolFrames) > 0 && <>{t.poolFrames} Pool frame{num(t.poolFrames) === 1 ? "" : "s"}</>}
                           </td>
                           <td>
                             <strong>{money(t.amount)}</strong>
@@ -1260,9 +1348,14 @@ export default function App() {
                           </td>
                           <td style={{ color: "#667085" }}>{t.notes || "-"}</td>
                           <td>
+                            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                             <button onClick={() => openEditTransaction(t)} style={{ ...buttonStyle, background: "#f9fafb", color: "#101828", border: "1px solid #d5d7db", padding: "5px 9px" }}>
                               Edit
                             </button>
+                            <button onClick={() => deleteTransaction(t.id)} style={{ ...buttonStyle, background: "#fff", color: "#b42318", border: "1px solid #fecdca", padding: "5px 9px" }}>
+                              Delete
+                            </button>
+                            </div>
                           </td>
                         </tr>
                       ))
