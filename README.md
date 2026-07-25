@@ -11,7 +11,9 @@ npm run dev
 
 ## Export/Import
 
-Use **Save Excel** to export `buki_tracker.xlsx`, and **Load Excel** to restore data from a workbook.
+Use **Load Excel** to load the workbook you use for daily records. After a workbook is loaded, **Save Excel** downloads an updated copy using that same filename. **Save As New** downloads a date-stamped workbook such as `buki_tracker_2026-07-25.xlsx`.
+
+Browsers do not allow a website to silently overwrite an arbitrary local Excel file for safety reasons, so saving still happens through the browser's download flow. If your browser asks what to do with the file, choose replace/overwrite to keep one workbook.
 
 The app also saves automatically in the current browser with `localStorage`.
 

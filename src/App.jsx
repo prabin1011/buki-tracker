@@ -7,8 +7,8 @@ const STORE_KEY = "buki-tracker-v1";
 const SHEETS_URL = import.meta.env.VITE_GOOGLE_SHEET_WEBAPP_URL || "";
 const PAYMENT_METHODS = ["eSewa", "Online", "Hard cash"];
 const PRODUCTS = [
-  { key: "nauloStick", label: "Naulo Stick", unit: "stick", defaultPrice: 150 },
-  { key: "cig", label: "Cig", unit: "cig", defaultPrice: 25 },
+  { key: "nauloStick", label: "Naulo Stick", unit: "stick", defaultPrice: 200 },
+  { key: "cig", label: "Cig", unit: "cig", defaultPrice: 30 },
 ];
 
 function uid() {
@@ -23,6 +23,10 @@ function money(n) {
   return `${CURRENCY} ${Number(n || 0).toLocaleString()}`;
 }
 
+function num(n) {
+  return Number(n || 0);
+}
+
 function fmtDate(date) {
   if (!date) return "-";
   return new Date(`${date}T00:00:00`).toLocaleDateString("en-US", {
@@ -30,6 +34,29 @@ function fmtDate(date) {
     day: "numeric",
     year: "numeric",
   });
+}
+
+function normalizeName(name) {
+  return String(name || "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function normalizePhone(phone) {
+  return String(phone || "").replace(/\D/g, "");
+}
+
+function normalizeExcelDate(value) {
+  if (!value) return today();
+  if (typeof value === "number") {
+    const parsed = XLSX.SSF.parse_date_code(value);
+    if (parsed) {
+      return `${parsed.y}-${String(parsed.m).padStart(2, "0")}-${String(parsed.d).padStart(2, "0")}`;
+    }
+  }
+  const text = String(value).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
+  const parsed = new Date(text);
+  if (!Number.isNaN(parsed.getTime())) return parsed.toISOString().slice(0, 10);
+  return today();
 }
 
 function emptyStock(date = today()) {
@@ -123,11 +150,15 @@ function buildWorkbook(clients, transactions, stockRows) {
         "Opening Naulo Stick",
         "Prepared Naulo Stick",
         "Sold Naulo Stick",
-        "Remaining Naulo Stick",
+        "Opening Naulo Stick Remaining",
+        "Prepared Naulo Stick Remaining",
+        "Total Naulo Stick Remaining",
         "Opening Cig",
         "Prepared Cig",
         "Sold Cig",
-        "Remaining Cig",
+        "Opening Cig Remaining",
+        "Prepared Cig Remaining",
+        "Total Cig Remaining",
         "Sales",
         "Due",
         "Paid",
@@ -138,10 +169,14 @@ function buildWorkbook(clients, transactions, stockRows) {
         r.openingNauloStick,
         r.nauloStickPrepared,
         r.soldNauloStick,
+        r.openingNauloStickRemaining,
+        r.preparedNauloStickRemaining,
         r.remainingNauloStick,
         r.openingCig,
         r.cigPrepared,
         r.soldCig,
+        r.openingCigRemaining,
+        r.preparedCigRemaining,
         r.remainingCig,
         r.sales,
         r.due,
@@ -243,6 +278,40 @@ function Stat({ label, value, tone = "dark" }) {
   );
 }
 
+function NumberInput({ value, onChange, ...props }) {
+  const [draft, setDraft] = useState(String(num(value)));
+
+  useEffect(() => {
+    setDraft(String(num(value)));
+  }, [value]);
+
+  function commit(nextDraft) {
+    const clean = nextDraft.trim();
+    onChange(clean === "" ? 0 : Math.max(0, Number(clean) || 0));
+  }
+
+  return (
+    <input
+      {...props}
+      type="number"
+      min="0"
+      value={draft}
+      onChange={(e) => {
+        setDraft(e.target.value);
+        if (e.target.value !== "") commit(e.target.value);
+      }}
+      onBlur={() => {
+        if (draft === "") {
+          setDraft("0");
+          onChange(0);
+        } else {
+          commit(draft);
+        }
+      }}
+    />
+  );
+}
+
 export default function App() {
   const initial = loadInitialData();
   const [clients, setClients] = useState(initial?.clients || []);
@@ -254,6 +323,7 @@ export default function App() {
   const [clientForm, setClientForm] = useState({ name: "", phone: "", notes: "" });
   const [message, setMessage] = useState("");
   const [syncState, setSyncState] = useState(SHEETS_URL ? "Google Sheets sync on" : "Excel/local mode");
+  const [loadedFileName, setLoadedFileName] = useState("");
 
   const stock = stockByDate[date] || emptyStock(date);
 
@@ -264,19 +334,35 @@ export default function App() {
   const dayTransactions = useMemo(() => transactions.filter((t) => t.date === date), [transactions, date]);
 
   const daily = useMemo(() => {
-    const soldNauloStick = dayTransactions.reduce((sum, t) => sum + Number(t.nauloStick || 0), 0);
-    const soldCig = dayTransactions.reduce((sum, t) => sum + Number(t.cig || 0), 0);
-    const sales = dayTransactions.reduce((sum, t) => sum + Number(t.amount || 0), 0);
-    const paid = dayTransactions.filter((t) => t.paid).reduce((sum, t) => sum + Number(t.amount || 0), 0);
+    const soldNauloStick = dayTransactions.reduce((sum, t) => sum + num(t.nauloStick), 0);
+    const soldCig = dayTransactions.reduce((sum, t) => sum + num(t.cig), 0);
+    const sales = dayTransactions.reduce((sum, t) => sum + num(t.amount), 0);
+    const paid = dayTransactions.filter((t) => t.paid).reduce((sum, t) => sum + num(t.amount), 0);
     const due = sales - paid;
+    const openingNauloStickUsed = Math.min(num(stock.openingNauloStick), soldNauloStick);
+    const preparedNauloStickUsed = Math.max(0, soldNauloStick - openingNauloStickUsed);
+    const openingCigUsed = Math.min(num(stock.openingCig), soldCig);
+    const preparedCigUsed = Math.max(0, soldCig - openingCigUsed);
+    const openingNauloStickRemaining = num(stock.openingNauloStick) - openingNauloStickUsed;
+    const preparedNauloStickRemaining = num(stock.nauloStickPrepared) - preparedNauloStickUsed;
+    const openingCigRemaining = num(stock.openingCig) - openingCigUsed;
+    const preparedCigRemaining = num(stock.cigPrepared) - preparedCigUsed;
     return {
       soldNauloStick,
       soldCig,
       sales,
       paid,
       due,
-      remainingNauloStick: Number(stock.openingNauloStick || 0) + Number(stock.nauloStickPrepared || 0) - soldNauloStick,
-      remainingCig: Number(stock.openingCig || 0) + Number(stock.cigPrepared || 0) - soldCig,
+      openingNauloStickUsed,
+      preparedNauloStickUsed,
+      openingCigUsed,
+      preparedCigUsed,
+      openingNauloStickRemaining,
+      preparedNauloStickRemaining,
+      openingCigRemaining,
+      preparedCigRemaining,
+      remainingNauloStick: openingNauloStickRemaining + preparedNauloStickRemaining,
+      remainingCig: openingCigRemaining + preparedCigRemaining,
     };
   }, [dayTransactions, stock]);
 
@@ -285,10 +371,18 @@ export default function App() {
     return dates.map((d) => {
       const row = stockByDate[d] || emptyStock(d);
       const rows = transactions.filter((t) => t.date === d);
-      const soldNauloStick = rows.reduce((sum, t) => sum + Number(t.nauloStick || 0), 0);
-      const soldCig = rows.reduce((sum, t) => sum + Number(t.cig || 0), 0);
-      const sales = rows.reduce((sum, t) => sum + Number(t.amount || 0), 0);
-      const paid = rows.filter((t) => t.paid).reduce((sum, t) => sum + Number(t.amount || 0), 0);
+      const soldNauloStick = rows.reduce((sum, t) => sum + num(t.nauloStick), 0);
+      const soldCig = rows.reduce((sum, t) => sum + num(t.cig), 0);
+      const sales = rows.reduce((sum, t) => sum + num(t.amount), 0);
+      const paid = rows.filter((t) => t.paid).reduce((sum, t) => sum + num(t.amount), 0);
+      const openingNauloStickUsed = Math.min(num(row.openingNauloStick), soldNauloStick);
+      const preparedNauloStickUsed = Math.max(0, soldNauloStick - openingNauloStickUsed);
+      const openingCigUsed = Math.min(num(row.openingCig), soldCig);
+      const preparedCigUsed = Math.max(0, soldCig - openingCigUsed);
+      const openingNauloStickRemaining = num(row.openingNauloStick) - openingNauloStickUsed;
+      const preparedNauloStickRemaining = num(row.nauloStickPrepared) - preparedNauloStickUsed;
+      const openingCigRemaining = num(row.openingCig) - openingCigUsed;
+      const preparedCigRemaining = num(row.cigPrepared) - preparedCigUsed;
       return {
         ...row,
         soldNauloStick,
@@ -296,8 +390,12 @@ export default function App() {
         sales,
         paid,
         due: sales - paid,
-        remainingNauloStick: Number(row.openingNauloStick || 0) + Number(row.nauloStickPrepared || 0) - soldNauloStick,
-        remainingCig: Number(row.openingCig || 0) + Number(row.cigPrepared || 0) - soldCig,
+        openingNauloStickRemaining,
+        preparedNauloStickRemaining,
+        remainingNauloStick: openingNauloStickRemaining + preparedNauloStickRemaining,
+        openingCigRemaining,
+        preparedCigRemaining,
+        remainingCig: openingCigRemaining + preparedCigRemaining,
       };
     });
   }, [stockByDate, transactions]);
@@ -334,13 +432,13 @@ export default function App() {
       setMessage("Choose a client first.");
       return;
     }
-    const nauloStick = Math.max(0, Number(txForm.nauloStick || 0));
-    const cig = Math.max(0, Number(txForm.cig || 0));
+    const nauloStick = Math.max(0, num(txForm.nauloStick));
+    const cig = Math.max(0, num(txForm.cig));
     if (nauloStick + cig <= 0) {
       setMessage("Add at least one item.");
       return;
     }
-    const amount = nauloStick * Number(txForm.nauloStickPrice || 0) + cig * Number(txForm.cigPrice || 0);
+    const amount = nauloStick * num(txForm.nauloStickPrice) + cig * num(txForm.cigPrice);
     const record = {
       id: uid(),
       date,
@@ -348,8 +446,8 @@ export default function App() {
       clientName: client.name,
       nauloStick,
       cig,
-      nauloStickPrice: Number(txForm.nauloStickPrice || 0),
-      cigPrice: Number(txForm.cigPrice || 0),
+      nauloStickPrice: num(txForm.nauloStickPrice),
+      cigPrice: num(txForm.cigPrice),
       paid: Boolean(txForm.paid),
       method: txForm.paid ? txForm.method : "",
       amount,
@@ -381,8 +479,8 @@ export default function App() {
       [nextDate]: {
         ...emptyStock(nextDate),
         ...(prev[nextDate] || {}),
-        openingNauloStick: Math.max(0, daily.remainingNauloStick),
-        openingCig: Math.max(0, daily.remainingCig),
+        openingNauloStick: num(prev[nextDate]?.openingNauloStick) + Math.max(0, daily.remainingNauloStick),
+        openingCig: num(prev[nextDate]?.openingCig) + Math.max(0, daily.remainingCig),
       },
     }));
     setDate(nextDate);
@@ -402,9 +500,11 @@ export default function App() {
     }
   }
 
-  function exportExcel() {
-    XLSX.writeFile(buildWorkbook(clients, transactions, allStockRows), "buki_tracker.xlsx");
-    setMessage("Excel file exported.");
+  function exportExcel(saveAsNew = false) {
+    const fallback = "buki_tracker.xlsx";
+    const fileName = saveAsNew ? `buki_tracker_${date}.xlsx` : loadedFileName || fallback;
+    XLSX.writeFile(buildWorkbook(clients, transactions, allStockRows), fileName);
+    setMessage(saveAsNew ? "New Excel file exported." : `Excel saved as ${fileName}.`);
   }
 
   function importExcel(event) {
@@ -413,49 +513,89 @@ export default function App() {
     const reader = new FileReader();
     reader.onload = (e) => {
       try {
-        const wb = XLSX.read(e.target.result, { type: "array" });
+        const wb = XLSX.read(e.target.result, { type: "array", cellDates: false });
         const clientRows = XLSX.utils.sheet_to_json(wb.Sheets.Clients || {});
         const txRows = XLSX.utils.sheet_to_json(wb.Sheets.Transactions || {});
         const dailyRows = XLSX.utils.sheet_to_json(wb.Sheets["Daily Summary"] || {});
         const nextStock = {};
         dailyRows.forEach((r) => {
           if (!r.Date) return;
-          nextStock[r.Date] = {
-            date: r.Date,
-            openingNauloStick: Number(r["Opening Naulo Stick"] || 0),
-            nauloStickPrepared: Number(r["Prepared Naulo Stick"] || 0),
-            openingCig: Number(r["Opening Cig"] || 0),
-            cigPrepared: Number(r["Prepared Cig"] || 0),
+          const normalizedDate = normalizeExcelDate(r.Date);
+          nextStock[normalizedDate] = {
+            date: normalizedDate,
+            openingNauloStick: num(r["Opening Naulo Stick"]),
+            nauloStickPrepared: num(r["Prepared Naulo Stick"]),
+            openingCig: num(r["Opening Cig"]),
+            cigPrepared: num(r["Prepared Cig"]),
             notes: r.Notes || "",
           };
         });
-        setClients(
-          clientRows.map((r) => ({
+        const nextClients = [];
+        const idMap = new Map();
+        const phoneMap = new Map();
+        const nameMap = new Map();
+        clientRows.forEach((r) => {
+          const incoming = {
             id: r.ID || uid(),
-            name: r.Name || "",
-            phone: r.Phone || "",
+            name: String(r.Name || "").trim(),
+            phone: String(r.Phone || "").trim(),
             notes: r.Notes || "",
-            joined: r.Joined || today(),
-          }))
-        );
-        setTransactions(
-          txRows.map((r) => ({
+            joined: normalizeExcelDate(r.Joined),
+          };
+          if (!incoming.name) return;
+          const phoneKey = normalizePhone(incoming.phone);
+          const nameKey = normalizeName(incoming.name);
+          const existing =
+            (incoming.id && idMap.get(incoming.id)) ||
+            (phoneKey && phoneMap.get(phoneKey)) ||
+            (nameKey && nameMap.get(nameKey));
+          if (existing) {
+            existing.phone = existing.phone || incoming.phone;
+            existing.notes = existing.notes || incoming.notes;
+            idMap.set(incoming.id, existing);
+            return;
+          }
+          nextClients.push(incoming);
+          idMap.set(incoming.id, incoming);
+          if (phoneKey) phoneMap.set(phoneKey, incoming);
+          if (nameKey) nameMap.set(nameKey, incoming);
+        });
+        const mappedTransactions = txRows.map((r) => {
+          const rawClientId = r.ClientID || "";
+          const rawClientName = String(r.Client || "").trim();
+          const matched =
+            (rawClientId && idMap.get(rawClientId)) ||
+            (rawClientName && nameMap.get(normalizeName(rawClientName)));
+          let client = matched;
+          if (!client && rawClientName) {
+            client = { id: uid(), name: rawClientName, phone: "", notes: "", joined: normalizeExcelDate(r.Date) };
+            nextClients.push(client);
+            idMap.set(client.id, client);
+            nameMap.set(normalizeName(client.name), client);
+          }
+          return {
             id: r.ID || uid(),
-            date: r.Date || today(),
-            clientId: r.ClientID || "",
-            clientName: r.Client || "",
-            nauloStick: Number(r["Naulo Stick"] || 0),
-            cig: Number(r.Cig || 0),
-            nauloStickPrice: Number(r["Naulo Stick Price"] || PRODUCTS[0].defaultPrice),
-            cigPrice: Number(r["Cig Price"] || PRODUCTS[1].defaultPrice),
-            amount: Number(r.Amount || 0),
+            date: normalizeExcelDate(r.Date),
+            clientId: client?.id || rawClientId,
+            clientName: client?.name || rawClientName,
+            nauloStick: num(r["Naulo Stick"]),
+            cig: num(r.Cig),
+            nauloStickPrice: num(r["Naulo Stick Price"]) || PRODUCTS[0].defaultPrice,
+            cigPrice: num(r["Cig Price"]) || PRODUCTS[1].defaultPrice,
+            amount:
+              num(r.Amount) ||
+              num(r["Naulo Stick"]) * (num(r["Naulo Stick Price"]) || PRODUCTS[0].defaultPrice) +
+                num(r.Cig) * (num(r["Cig Price"]) || PRODUCTS[1].defaultPrice),
             paid: r["Payment Status"] !== "Due",
             method: r["Payment Method"] || "",
             notes: r.Notes || "",
-          }))
-        );
+          };
+        });
+        setClients(nextClients);
+        setTransactions(mappedTransactions);
         setStockByDate(nextStock);
-        setMessage("Excel file imported.");
+        setLoadedFileName(file.name || "buki_tracker.xlsx");
+        setMessage(`${file.name || "Excel file"} loaded. Save Excel will use the same filename.`);
       } catch {
         setMessage("Could not import that Excel file.");
       } finally {
@@ -507,6 +647,7 @@ export default function App() {
                 <h1 style={{ margin: 0, fontSize: 24, letterSpacing: 0 }}>{APP_NAME}</h1>
                 <div style={{ fontSize: 13, color: "#667085" }}>Daily client, stock, due, and payment tracker</div>
                 <div style={{ fontSize: 12, color: SHEETS_URL ? "#067647" : "#667085", marginTop: 2 }}>{syncState}</div>
+                {loadedFileName && <div style={{ fontSize: 12, color: "#667085", marginTop: 2 }}>Loaded workbook: {loadedFileName}</div>}
               </div>
             </div>
           </div>
@@ -515,8 +656,11 @@ export default function App() {
               Load Excel
               <input type="file" accept=".xlsx" onChange={importExcel} style={{ display: "none" }} />
             </label>
-            <button onClick={exportExcel} style={{ ...buttonStyle, background: "#101828", color: "#fff" }}>
+            <button onClick={() => exportExcel(false)} style={{ ...buttonStyle, background: "#101828", color: "#fff" }}>
               Save Excel
+            </button>
+            <button onClick={() => exportExcel(true)} style={{ ...buttonStyle, background: "#fff", color: "#101828", border: "1px solid #d5d7db" }}>
+              Save As New
             </button>
           </div>
         </header>
@@ -534,16 +678,16 @@ export default function App() {
             </Field>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 10 }} className="formgrid">
               <Field label="Opening Naulo Stick">
-                <input type="number" min="0" style={inputStyle} value={stock.openingNauloStick} onChange={(e) => updateStock("openingNauloStick", Number(e.target.value || 0))} />
+                <NumberInput style={inputStyle} value={stock.openingNauloStick} onChange={(value) => updateStock("openingNauloStick", value)} />
               </Field>
               <Field label="Prepared Naulo Stick">
-                <input type="number" min="0" style={inputStyle} value={stock.nauloStickPrepared} onChange={(e) => updateStock("nauloStickPrepared", Number(e.target.value || 0))} />
+                <NumberInput style={inputStyle} value={stock.nauloStickPrepared} onChange={(value) => updateStock("nauloStickPrepared", value)} />
               </Field>
               <Field label="Opening Cig">
-                <input type="number" min="0" style={inputStyle} value={stock.openingCig} onChange={(e) => updateStock("openingCig", Number(e.target.value || 0))} />
+                <NumberInput style={inputStyle} value={stock.openingCig} onChange={(value) => updateStock("openingCig", value)} />
               </Field>
               <Field label="Prepared Cig">
-                <input type="number" min="0" style={inputStyle} value={stock.cigPrepared} onChange={(e) => updateStock("cigPrepared", Number(e.target.value || 0))} />
+                <NumberInput style={inputStyle} value={stock.cigPrepared} onChange={(value) => updateStock("cigPrepared", value)} />
               </Field>
             </div>
             <button onClick={carryForward} style={{ ...buttonStyle, background: "#eef4ff", color: "#3538cd", border: "1px solid #c7d7fe" }}>
@@ -555,10 +699,23 @@ export default function App() {
         <section className="stats" style={{ display: "grid", gridTemplateColumns: "repeat(6,1fr)", gap: 10, marginBottom: 12 }}>
           <Stat label="Stick sold" value={daily.soldNauloStick} />
           <Stat label="Cig sold" value={daily.soldCig} />
-          <Stat label="Stick remaining" value={daily.remainingNauloStick} tone={daily.remainingNauloStick < 0 ? "bad" : "dark"} />
-          <Stat label="Cig remaining" value={daily.remainingCig} tone={daily.remainingCig < 0 ? "bad" : "dark"} />
+          <Stat label="Stick carry total" value={daily.remainingNauloStick} tone={daily.remainingNauloStick < 0 ? "bad" : "dark"} />
+          <Stat label="Cig carry total" value={daily.remainingCig} tone={daily.remainingCig < 0 ? "bad" : "dark"} />
           <Stat label="Paid" value={money(daily.paid)} tone="good" />
           <Stat label="Due" value={money(daily.due)} tone={daily.due > 0 ? "bad" : "dark"} />
+        </section>
+
+        <section style={{ background: "#fff", border: "1px solid #eaecf0", borderRadius: 8, padding: 14, marginBottom: 12 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
+            <strong>Remaining Stock</strong>
+            <span style={{ fontSize: 12, color: "#667085" }}>Sales consume opening stock first, then prepared stock.</span>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 10 }} className="stats">
+            <Stat label="Opening stick left" value={daily.openingNauloStickRemaining} tone={daily.openingNauloStickRemaining < 0 ? "bad" : "dark"} />
+            <Stat label="Prepared stick left" value={daily.preparedNauloStickRemaining} tone={daily.preparedNauloStickRemaining < 0 ? "bad" : "dark"} />
+            <Stat label="Opening cig left" value={daily.openingCigRemaining} tone={daily.openingCigRemaining < 0 ? "bad" : "dark"} />
+            <Stat label="Prepared cig left" value={daily.preparedCigRemaining} tone={daily.preparedCigRemaining < 0 ? "bad" : "dark"} />
+          </div>
         </section>
 
         <main className="layout" style={{ display: "grid", gridTemplateColumns: "360px 1fr", gap: 12, alignItems: "start" }}>
@@ -582,18 +739,18 @@ export default function App() {
               </Field>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                 <Field label="Naulo Stick taken">
-                  <input type="number" min="0" style={inputStyle} value={txForm.nauloStick} onChange={(e) => setTxForm((p) => ({ ...p, nauloStick: Number(e.target.value || 0) }))} />
+                  <NumberInput style={inputStyle} value={txForm.nauloStick} onChange={(value) => setTxForm((p) => ({ ...p, nauloStick: value }))} />
                 </Field>
                 <Field label="Cig taken">
-                  <input type="number" min="0" style={inputStyle} value={txForm.cig} onChange={(e) => setTxForm((p) => ({ ...p, cig: Number(e.target.value || 0) }))} />
+                  <NumberInput style={inputStyle} value={txForm.cig} onChange={(value) => setTxForm((p) => ({ ...p, cig: value }))} />
                 </Field>
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                 <Field label="Stick price">
-                  <input type="number" min="0" style={inputStyle} value={txForm.nauloStickPrice} onChange={(e) => setTxForm((p) => ({ ...p, nauloStickPrice: Number(e.target.value || 0) }))} />
+                  <NumberInput style={inputStyle} value={txForm.nauloStickPrice} onChange={(value) => setTxForm((p) => ({ ...p, nauloStickPrice: value }))} />
                 </Field>
                 <Field label="Cig price">
-                  <input type="number" min="0" style={inputStyle} value={txForm.cigPrice} onChange={(e) => setTxForm((p) => ({ ...p, cigPrice: Number(e.target.value || 0) }))} />
+                  <NumberInput style={inputStyle} value={txForm.cigPrice} onChange={(value) => setTxForm((p) => ({ ...p, cigPrice: value }))} />
                 </Field>
               </div>
               <Field label="Payment">
@@ -615,7 +772,7 @@ export default function App() {
                 <textarea style={{ ...inputStyle, resize: "vertical", minHeight: 72 }} value={txForm.notes} onChange={(e) => setTxForm((p) => ({ ...p, notes: e.target.value }))} />
               </Field>
               <div style={{ background: "#f9fafb", border: "1px solid #eaecf0", borderRadius: 8, padding: 10, fontSize: 13 }}>
-                Total: <strong>{money(Number(txForm.nauloStick || 0) * Number(txForm.nauloStickPrice || 0) + Number(txForm.cig || 0) * Number(txForm.cigPrice || 0))}</strong>
+                Total: <strong>{money(num(txForm.nauloStick) * num(txForm.nauloStickPrice) + num(txForm.cig) * num(txForm.cigPrice))}</strong>
               </div>
               <button onClick={addTransaction} style={{ ...buttonStyle, background: "#101828", color: "#fff", padding: 12 }}>
                 Record for {fmtDate(date)}
