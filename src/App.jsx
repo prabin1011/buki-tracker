@@ -4,7 +4,10 @@ import * as XLSX from "xlsx";
 const APP_NAME = "Buki Tracker";
 const CURRENCY = "NPR";
 const STORE_KEY = "buki-tracker-v1";
+const SESSION_KEY = "buki-tracker-session";
 const SHEETS_URL = import.meta.env.VITE_GOOGLE_SHEET_WEBAPP_URL || "";
+const AUTH_USERNAME = "bookitracker@123";
+const AUTH_PASSWORD = "arjun_buki_tracker";
 const PAYMENT_METHODS = ["eSewa", "Online", "Hard cash"];
 const PRODUCTS = [
   { key: "nauloStick", label: "Naulo Stick", unit: "stick", defaultPrice: 200 },
@@ -457,8 +460,58 @@ function NumberInput({ value, onChange, ...props }) {
   );
 }
 
+function LoginScreen({ onLogin }) {
+  const [form, setForm] = useState({ username: "", password: "" });
+  const [error, setError] = useState("");
+
+  function submit(e) {
+    e.preventDefault();
+    if (form.username === AUTH_USERNAME && form.password === AUTH_PASSWORD) {
+      sessionStorage.setItem(SESSION_KEY, "ok");
+      onLogin();
+      return;
+    }
+    setError("Invalid username or password.");
+  }
+
+  return (
+    <>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800;900&display=swap');
+        *{box-sizing:border-box}
+        body{margin:0;background:#f4f6f8;color:#101828;font-family:Inter,Segoe UI,system-ui,sans-serif}
+        input:focus{outline:2px solid #10182822;border-color:#101828}
+      `}</style>
+      <main style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: 18 }}>
+        <form onSubmit={submit} style={{ width: 390, maxWidth: "100%", background: "#fff", border: "1px solid #e4e7ec", borderRadius: 12, padding: 22, boxShadow: "0 18px 50px rgba(16,24,40,0.08)" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 18 }}>
+            <div style={{ width: 40, height: 40, borderRadius: 10, background: "#101828", color: "#fff", display: "grid", placeItems: "center", fontWeight: 900 }}>B</div>
+            <div>
+              <h1 style={{ margin: 0, fontSize: 22 }}>Buki Tracker</h1>
+              <div style={{ fontSize: 13, color: "#667085" }}>Private access</div>
+            </div>
+          </div>
+          <div style={{ display: "grid", gap: 12 }}>
+            <Field label="Username">
+              <input style={inputStyle} value={form.username} onChange={(e) => setForm((p) => ({ ...p, username: e.target.value }))} autoComplete="username" />
+            </Field>
+            <Field label="Password">
+              <input style={inputStyle} type="password" value={form.password} onChange={(e) => setForm((p) => ({ ...p, password: e.target.value }))} autoComplete="current-password" />
+            </Field>
+            {error && <div style={{ background: "#fef3f2", border: "1px solid #fecdca", color: "#b42318", padding: "9px 10px", borderRadius: 8, fontSize: 13, fontWeight: 700 }}>{error}</div>}
+            <button type="submit" style={{ ...buttonStyle, background: "#101828", color: "#fff", padding: 12 }}>
+              Log In
+            </button>
+          </div>
+        </form>
+      </main>
+    </>
+  );
+}
+
 export default function App() {
   const initial = loadInitialData();
+  const [authed, setAuthed] = useState(() => sessionStorage.getItem(SESSION_KEY) === "ok");
   const [clients, setClients] = useState(initial?.clients || []);
   const [transactions, setTransactions] = useState(initial?.transactions || []);
   const [stockByDate, setStockByDate] = useState(initial?.stockByDate || {});
@@ -479,12 +532,37 @@ export default function App() {
 
   const stock = stockByDate[date] || emptyStock(date);
 
+  function logout() {
+    sessionStorage.removeItem(SESSION_KEY);
+    setAuthed(false);
+  }
+
   useEffect(() => {
     localStorage.setItem(STORE_KEY, JSON.stringify({ clients, transactions, stockByDate }));
   }, [clients, transactions, stockByDate]);
 
+  async function refreshCloudRecords() {
+    if (!SHEETS_URL) {
+      setSyncState("Google Sheet URL missing");
+      setMessage("Add VITE_GOOGLE_SHEET_WEBAPP_URL in Vercel production settings.");
+      return;
+    }
+    setSyncState("Loading Google Sheet...");
+    try {
+      const records = await loadGoogleSheetRecords(SHEETS_URL);
+      const loaded = recordsToState(records);
+      setClients(loaded.clients);
+      setTransactions(loaded.transactions);
+      setStockByDate(loaded.stockByDate);
+      setSyncState(`Google Sheet connected - ${records.length} rows loaded`);
+    } catch {
+      setSyncState("Google Sheet load failed - local copy active");
+      setMessage("Google Sheet load failed. Redeploy Apps Script as a new Web App version and set access to Anyone.");
+    }
+  }
+
   useEffect(() => {
-    if (!SHEETS_URL) return;
+    if (!SHEETS_URL || !authed) return;
     let cancelled = false;
     loadGoogleSheetRecords(SHEETS_URL)
       .then((records) => {
@@ -496,12 +574,15 @@ export default function App() {
         setSyncState(`Google Sheet connected - ${records.length} rows loaded`);
       })
       .catch(() => {
-        if (!cancelled) setSyncState("Google Sheet load failed - local copy active");
+        if (!cancelled) {
+          setSyncState("Google Sheet load failed - local copy active");
+          setMessage("Google Sheet load failed. Redeploy Apps Script as a new Web App version and set access to Anyone.");
+        }
       });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [authed]);
 
   const dayTransactions = useMemo(() => transactions.filter((t) => t.date === date), [transactions, date]);
 
@@ -656,6 +737,32 @@ export default function App() {
     }
   }
 
+  function currentDailySummary() {
+    return {
+      date,
+      ...stock,
+      openingCigPieces: cigOpeningPieces(stock),
+      cigPacketsBought: cigBoughtPackets(stock),
+      cigPiecesBought: cigBoughtPieces(stock),
+      ...daily,
+    };
+  }
+
+  async function saveDayStock() {
+    setMessage(`Saving stock for ${fmtDate(date)}...`);
+    try {
+      const result = await syncToGoogleSheet({
+        type: "daily_summary",
+        summary: currentDailySummary(),
+      });
+      setSyncState(result.skipped ? "Local export mode" : "Stock day saved to Google Sheet");
+      setMessage(`Stock for ${fmtDate(date)} saved.`);
+    } catch {
+      setSyncState("Google Sheet sync failed");
+      setMessage("Could not save day stock. Check Apps Script deployment and access.");
+    }
+  }
+
   async function carryForward() {
     const next = new Date(`${date}T00:00:00`);
     next.setDate(next.getDate() + 1);
@@ -674,14 +781,7 @@ export default function App() {
     try {
       const result = await syncToGoogleSheet({
         type: "daily_summary",
-        summary: {
-          date,
-          ...stock,
-          openingCigPieces: cigOpeningPieces(stock),
-          cigPacketsBought: cigBoughtPackets(stock),
-          cigPiecesBought: cigBoughtPieces(stock),
-          ...daily,
-        },
+        summary: currentDailySummary(),
       });
       setSyncState(result.skipped ? "Local export mode" : "Daily summary synced to Google Sheet");
     } catch {
@@ -718,6 +818,8 @@ export default function App() {
     XLSX.writeFile(buildFilteredWorkbook(clients, transactions, allStockRows, exportFilters), fileName);
     setMessage(`Exported ${fileName}.`);
   }
+
+  if (!authed) return <LoginScreen onLogin={() => setAuthed(true)} />;
 
   return (
     <>
@@ -827,6 +929,12 @@ export default function App() {
             <button onClick={() => setExportOpen(true)} style={{ ...buttonStyle, background: "#fff", color: "#101828", border: "1px solid #d5d7db" }}>
               Export Excel
             </button>
+            <button onClick={refreshCloudRecords} style={{ ...buttonStyle, background: "#fff", color: "#067647", border: "1px solid #abefc6" }}>
+              Refresh Sheet
+            </button>
+            <button onClick={logout} style={{ ...buttonStyle, background: "#fff", color: "#b42318", border: "1px solid #fecdca" }}>
+              Log Out
+            </button>
           </div>
         </header>
 
@@ -855,9 +963,17 @@ export default function App() {
                 <NumberInput style={inputStyle} value={cigBoughtPackets(stock)} onChange={(value) => updateStock("cigPacketsBought", value)} />
               </Field>
             </div>
-            <button onClick={carryForward} style={{ ...buttonStyle, background: "#eef4ff", color: "#3538cd", border: "1px solid #c7d7fe" }}>
-              Carry to Next Day
-            </button>
+            <div style={{ display: "grid", gap: 8 }}>
+              <button onClick={saveDayStock} style={{ ...buttonStyle, background: "#101828", color: "#fff" }}>
+                Save Day Stock
+              </button>
+              <button onClick={carryForward} style={{ ...buttonStyle, background: "#eef4ff", color: "#3538cd", border: "1px solid #c7d7fe" }}>
+                Carry Remaining
+              </button>
+            </div>
+          </div>
+          <div style={{ marginTop: 10, fontSize: 12, color: "#667085" }}>
+            Opening stock is the inventory available for {fmtDate(date)}. Only remaining items carry into the next day.
           </div>
         </Panel>
 
