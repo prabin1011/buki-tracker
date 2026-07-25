@@ -153,12 +153,7 @@ function sendJson(data, callback) {
   return ContentService.createTextOutput(json).setMimeType(ContentService.MimeType.JSON);
 }
 
-function doGet(e) {
-  return sendJson({ ok: true, records: getRecords() }, e.parameter.callback);
-}
-
-function doPost(e) {
-  const payload = JSON.parse(e.postData.contents || "{}");
+function handlePayload(payload) {
   const timestamp = new Date();
 
   if (payload.type === "client") {
@@ -232,5 +227,27 @@ function doPost(e) {
     });
   }
 
-  return sendJson({ ok: true });
+  return { ok: true };
+}
+
+function doGet(e) {
+  try {
+    if (e.parameter.payload) {
+      const payload = JSON.parse(e.parameter.payload);
+      handlePayload(payload);
+    }
+    return sendJson({ ok: true, records: getRecords() }, e.parameter.callback);
+  } catch (error) {
+    return sendJson({ ok: false, error: error.message, records: getRecords() }, e.parameter.callback);
+  }
+}
+
+function doPost(e) {
+  try {
+    const payload = JSON.parse(e.postData.contents || "{}");
+    handlePayload(payload);
+    return sendJson({ ok: true, records: getRecords() });
+  } catch (error) {
+    return sendJson({ ok: false, error: error.message, records: getRecords() });
+  }
 }

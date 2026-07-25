@@ -322,23 +322,18 @@ function buildFilteredWorkbook(clients, transactions, stockRows, filters) {
 
 async function syncToGoogleSheet(payload) {
   if (!SHEETS_URL) return { skipped: true };
-  const response = await fetch(SHEETS_URL, {
-    method: "POST",
-    mode: "no-cors",
-    headers: { "Content-Type": "text/plain;charset=utf-8" },
-    body: JSON.stringify(payload),
-  });
-  return { skipped: false, response };
+  return requestGoogleSheet(SHEETS_URL, payload);
 }
 
-function loadGoogleSheetRecords(url) {
+function requestGoogleSheet(url, payload = null) {
   return new Promise((resolve, reject) => {
     const callback = `bukiSheetCallback_${Date.now()}_${Math.random().toString(36).slice(2)}`;
     const script = document.createElement("script");
     const separator = url.includes("?") ? "&" : "?";
+    const payloadParam = payload ? `&payload=${encodeURIComponent(JSON.stringify(payload))}` : "";
     const timer = window.setTimeout(() => {
       cleanup();
-      reject(new Error("Google Sheet load timed out"));
+      reject(new Error("Google Sheet request timed out"));
     }, 15000);
 
     function cleanup() {
@@ -349,17 +344,26 @@ function loadGoogleSheetRecords(url) {
 
     window[callback] = (data) => {
       cleanup();
-      resolve(data.records || []);
+      if (data && data.ok === false) {
+        reject(new Error(data.error || "Google Sheet request failed"));
+        return;
+      }
+      resolve({ skipped: false, records: data.records || [], data });
     };
 
     script.onerror = () => {
       cleanup();
-      reject(new Error("Could not load Google Sheet"));
+      reject(new Error("Could not reach Google Sheet"));
     };
 
-    script.src = `${url}${separator}callback=${callback}`;
+    script.src = `${url}${separator}callback=${callback}${payloadParam}`;
     document.body.appendChild(script);
   });
+}
+
+async function loadGoogleSheetRecords(url) {
+  const result = await requestGoogleSheet(url);
+  return result.records || [];
 }
 
 function recordsToState(records) {
@@ -642,6 +646,22 @@ export default function App() {
     localStorage.setItem(STORE_KEY, JSON.stringify({ clients, transactions, stockByDate }));
   }, [clients, transactions, stockByDate]);
 
+  function applySheetRecords(records, options = {}) {
+    const loaded = recordsToState(records);
+    setClients(loaded.clients);
+    setTransactions(loaded.transactions);
+    setStockByDate(loaded.stockByDate);
+    const nextDate = options.keepDate ? date : latestDataDate(loaded.transactions, loaded.stockByDate);
+    setDate(nextDate);
+    setExportFilters((prev) => ({ ...prev, from: nextDate, to: nextDate }));
+    setSyncState(`Google Sheet connected - ${records.length} rows, ${loaded.clients.length} clients, ${loaded.transactions.length} entries, ${Object.keys(loaded.stockByDate).length} stock days`);
+    return loaded;
+  }
+
+  function sheetHasTransaction(records, id) {
+    return records.some((row) => normalizeName(cell(row, "Record Type")) === "transaction" && String(cell(row, "ID")) === String(id));
+  }
+
   async function refreshCloudRecords() {
     if (!SHEETS_URL) {
       setSyncState("Google Sheet URL missing");
@@ -651,14 +671,7 @@ export default function App() {
     setSyncState("Loading Google Sheet...");
     try {
       const records = await loadGoogleSheetRecords(SHEETS_URL);
-      const loaded = recordsToState(records);
-      setClients(loaded.clients);
-      setTransactions(loaded.transactions);
-      setStockByDate(loaded.stockByDate);
-      const nextDate = latestDataDate(loaded.transactions, loaded.stockByDate);
-      setDate(nextDate);
-      setExportFilters((prev) => ({ ...prev, from: nextDate, to: nextDate }));
-      setSyncState(`Google Sheet connected - ${records.length} rows, ${loaded.clients.length} clients, ${loaded.transactions.length} entries, ${Object.keys(loaded.stockByDate).length} stock days`);
+      applySheetRecords(records);
     } catch {
       setSyncState("Google Sheet load failed - local copy active");
       setMessage("Google Sheet load failed. Redeploy Apps Script as a new Web App version and set access to Anyone.");
@@ -671,14 +684,7 @@ export default function App() {
     loadGoogleSheetRecords(SHEETS_URL)
       .then((records) => {
         if (cancelled) return;
-        const loaded = recordsToState(records);
-        setClients(loaded.clients);
-        setTransactions(loaded.transactions);
-        setStockByDate(loaded.stockByDate);
-        const nextDate = latestDataDate(loaded.transactions, loaded.stockByDate);
-        setDate(nextDate);
-        setExportFilters((prev) => ({ ...prev, from: nextDate, to: nextDate }));
-        setSyncState(`Google Sheet connected - ${records.length} rows, ${loaded.clients.length} clients, ${loaded.transactions.length} entries, ${Object.keys(loaded.stockByDate).length} stock days`);
+        applySheetRecords(records);
       })
       .catch(() => {
         if (!cancelled) {
@@ -753,7 +759,8 @@ export default function App() {
     setMessage(existing ? `${client.name} updated.` : `${client.name} added.`);
     try {
       const result = await syncToGoogleSheet({ type: "client", client });
-      setSyncState(result.skipped ? "Local export mode" : "Client synced to Google Sheet");
+      if (!result.skipped && result.records) applySheetRecords(result.records, { keepDate: true });
+      setSyncState(result.skipped ? "Local export mode" : "Client saved and confirmed in Google Sheet");
     } catch {
       setSyncState("Google Sheets sync failed");
     }
@@ -796,9 +803,14 @@ export default function App() {
     setMessage("Transaction recorded.");
     try {
       const result = await syncToGoogleSheet({ type: "transaction", transaction: record });
-      setSyncState(result.skipped ? "Local export mode" : "Transaction synced to Google Sheet");
+      if (!result.skipped && result.records) {
+        if (!sheetHasTransaction(result.records, record.id)) throw new Error("Saved transaction was not found in Google Sheet");
+        applySheetRecords(result.records, { keepDate: true });
+      }
+      setSyncState(result.skipped ? "Local export mode" : "Transaction saved and confirmed in Google Sheet");
     } catch {
-      setSyncState("Google Sheets sync failed");
+      setSyncState("Google Sheet save not confirmed");
+      setMessage("Transaction is kept locally, but Google Sheet did not confirm it. Update Apps Script, then click Save Excel.");
     }
   }
 
@@ -861,15 +873,21 @@ export default function App() {
     setMessage(editingTransactionId ? "Transaction updated." : "Transaction recorded.");
     try {
       const result = await syncToGoogleSheet({ type: "transaction", transaction: record });
-      setSyncState(result.skipped ? "Local export mode" : "Transaction synced to Google Sheet");
+      if (!result.skipped && result.records) {
+        if (!sheetHasTransaction(result.records, record.id)) throw new Error("Saved transaction was not found in Google Sheet");
+        applySheetRecords(result.records, { keepDate: true });
+      }
+      setSyncState(result.skipped ? "Local export mode" : "Transaction saved and confirmed in Google Sheet");
     } catch {
-      setSyncState("Google Sheets sync failed");
+      setSyncState("Google Sheet save not confirmed");
+      setMessage("Transaction is kept locally, but Google Sheet did not confirm it. Update Apps Script, then click Save Excel.");
     }
   }
 
   async function deleteTransaction(id) {
     const target = transactions.find((t) => t.id === id);
     if (!target) return;
+    if (!window.confirm(`Delete transaction for ${target.clientName || "this client"} on ${fmtDate(target.date)}?`)) return;
     setTransactions((prev) => prev.filter((t) => t.id !== id));
     if (editingTransactionId === id) {
       setEditingTransactionId(null);
@@ -878,10 +896,15 @@ export default function App() {
     setMessage("Transaction deleted.");
     try {
       const result = await syncToGoogleSheet({ type: "delete_transaction", id });
-      setSyncState(result.skipped ? "Local export mode" : "Transaction deleted from Google Sheet");
+      if (!result.skipped && result.records) {
+        if (sheetHasTransaction(result.records, id)) throw new Error("Deleted transaction is still in Google Sheet");
+        applySheetRecords(result.records, { keepDate: true });
+      }
+      setSyncState(result.skipped ? "Local export mode" : "Transaction deleted and confirmed in Google Sheet");
     } catch {
       setSyncState("Google Sheets delete failed");
-      setMessage("Deleted locally. Click Save Excel after updating Apps Script to remove it from Google Sheet.");
+      setTransactions((prev) => [target, ...prev.filter((t) => t.id !== id)]);
+      setMessage("Delete was not confirmed by Google Sheet, so the transaction was restored locally.");
     }
   }
 
@@ -896,8 +919,11 @@ export default function App() {
     );
     if (updatedTransaction) {
       syncToGoogleSheet({ type: "transaction", transaction: updatedTransaction })
-        .then((result) => setSyncState(result.skipped ? "Local export mode" : "Payment status synced to Google Sheet"))
-        .catch(() => setSyncState("Google Sheet sync failed"));
+        .then((result) => {
+          if (!result.skipped && result.records) applySheetRecords(result.records, { keepDate: true });
+          setSyncState(result.skipped ? "Local export mode" : "Payment status saved and confirmed in Google Sheet");
+        })
+        .catch(() => setSyncState("Google Sheet save not confirmed"));
     }
   }
 
@@ -924,6 +950,7 @@ export default function App() {
         type: "daily_summary",
         summary: { ...currentDailySummary(), ...savedStock },
       });
+      if (!result.skipped && result.records) applySheetRecords(result.records, { keepDate: true });
       setSyncState(result.skipped ? "Local export mode" : "Stock day saved to Google Sheet");
       setMessage(`Stock for ${fmtDate(date)} saved.`);
       setEditingStockDate(null);
@@ -954,6 +981,7 @@ export default function App() {
         type: "daily_summary",
         summary: currentDailySummary(),
       });
+      if (!result.skipped && result.records) applySheetRecords(result.records, { keepDate: true });
       setSyncState(result.skipped ? "Local export mode" : "Daily summary synced to Google Sheet");
     } catch {
       setSyncState("Google Sheets sync failed");
@@ -976,6 +1004,7 @@ export default function App() {
       for (const summary of allStockRows) {
         await syncToGoogleSheet({ type: "daily_summary", summary });
       }
+      await refreshCloudRecords();
       setSyncState("Google Sheet saved");
       setMessage("Saved to the same Google Sheet.");
     } catch {
