@@ -963,14 +963,9 @@ export default function App() {
                 <NumberInput style={inputStyle} value={cigBoughtPackets(stock)} onChange={(value) => updateStock("cigPacketsBought", value)} />
               </Field>
             </div>
-            <div style={{ display: "grid", gap: 8 }}>
-              <button onClick={saveDayStock} style={{ ...buttonStyle, background: "#101828", color: "#fff" }}>
-                Save Day Stock
-              </button>
-              <button onClick={carryForward} style={{ ...buttonStyle, background: "#eef4ff", color: "#3538cd", border: "1px solid #c7d7fe" }}>
-                Carry Remaining
-              </button>
-            </div>
+            <button onClick={saveDayStock} style={{ ...buttonStyle, background: "#101828", color: "#fff" }}>
+              Save Day Stock
+            </button>
           </div>
           <div style={{ marginTop: 10, fontSize: 12, color: "#667085" }}>
             Opening stock is the inventory available for {fmtDate(date)}. Only remaining items carry into the next day.
@@ -988,8 +983,15 @@ export default function App() {
 
         <Panel style={{ padding: 14, marginBottom: 12 }}>
           <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
-            <strong>Remaining Stock</strong>
-            <span style={{ fontSize: 12, color: "#667085" }}>Daily sales for {fmtDate(date)} consume opening stock first, then bought/prepared stock.</span>
+            <div>
+              <strong>Remaining Stock</strong>
+              <div style={{ fontSize: 12, color: "#667085", marginTop: 4 }}>
+                Daily sales for {fmtDate(date)} consume opening stock first, then bought/prepared stock.
+              </div>
+            </div>
+            <button onClick={carryForward} style={{ ...buttonStyle, background: "#eef4ff", color: "#3538cd", border: "1px solid #c7d7fe" }}>
+              Carry Remaining
+            </button>
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 10 }} className="stats">
             <Stat label="Opening stick left" value={daily.openingNauloStickRemaining} tone={daily.openingNauloStickRemaining < 0 ? "bad" : "dark"} />
