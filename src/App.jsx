@@ -10,6 +10,7 @@ const PRODUCTS = [
   { key: "nauloStick", label: "Naulo Stick", unit: "stick", defaultPrice: 200 },
   { key: "cig", label: "Cig", unit: "cig", defaultPrice: 30 },
 ];
+const CIGS_PER_PACKET = 20;
 
 function uid() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
@@ -59,11 +60,23 @@ function emptyStock(date = today()) {
   return {
     date,
     nauloStickPrepared: 0,
-    cigPrepared: 0,
+    cigPacketsBought: 0,
     openingNauloStick: 0,
-    openingCig: 0,
+    openingCigPieces: 0,
     notes: "",
   };
+}
+
+function cigOpeningPieces(stock) {
+  return num(stock.openingCigPieces ?? stock.openingCig);
+}
+
+function cigBoughtPackets(stock) {
+  return num(stock.cigPacketsBought ?? stock.cigPrepared);
+}
+
+function cigBoughtPieces(stock) {
+  return cigBoughtPackets(stock) * CIGS_PER_PACKET;
 }
 
 function defaultForm() {
@@ -149,12 +162,13 @@ function buildWorkbook(clients, transactions, stockRows) {
         "Opening Naulo Stick Remaining",
         "Prepared Naulo Stick Remaining",
         "Total Naulo Stick Remaining",
-        "Opening Cig",
-        "Prepared Cig",
+        "Opening Cig Pieces",
+        "Cig Packets Bought",
+        "Cig Pieces Bought",
         "Sold Cig",
-        "Opening Cig Remaining",
-        "Prepared Cig Remaining",
-        "Total Cig Remaining",
+        "Opening Cig Pieces Remaining",
+        "Bought Cig Pieces Remaining",
+        "Total Cig Pieces Remaining",
         "Sales",
         "Due",
         "Paid",
@@ -168,8 +182,9 @@ function buildWorkbook(clients, transactions, stockRows) {
         r.openingNauloStickRemaining,
         r.preparedNauloStickRemaining,
         r.remainingNauloStick,
-        r.openingCig,
-        r.cigPrepared,
+        r.openingCigPieces,
+        r.cigPacketsBought,
+        r.cigPiecesBought,
         r.soldCig,
         r.openingCigRemaining,
         r.preparedCigRemaining,
@@ -315,8 +330,10 @@ function recordsToState(records) {
         date,
         openingNauloStick: num(row["Opening Naulo Stick"]),
         nauloStickPrepared: num(row["Prepared Naulo Stick"]),
-        openingCig: num(row["Opening Cig"]),
-        cigPrepared: num(row["Prepared Cig"]),
+        openingCigPieces: num(row["Opening Cig Pieces"] || row["Opening Cig"]),
+        cigPacketsBought:
+          num(row["Cig Packets Bought"]) ||
+          Math.ceil(num(row["Cig Pieces Bought"] || row["Prepared Cig"]) / CIGS_PER_PACKET),
         notes: row.Notes || "",
       };
     }
@@ -332,17 +349,18 @@ function recordsToState(records) {
 const inputStyle = {
   width: "100%",
   border: "1px solid #d5d7db",
-  borderRadius: 6,
-  padding: "9px 10px",
+  borderRadius: 8,
+  padding: "10px 11px",
   fontSize: 14,
   fontFamily: "inherit",
   background: "#fff",
+  color: "#101828",
 };
 
 const buttonStyle = {
   border: "none",
-  borderRadius: 6,
-  padding: "9px 12px",
+  borderRadius: 8,
+  padding: "10px 14px",
   fontFamily: "inherit",
   fontWeight: 800,
   cursor: "pointer",
@@ -397,6 +415,14 @@ function Stat({ label, value, tone = "dark" }) {
   );
 }
 
+function Panel({ children, style }) {
+  return (
+    <section style={{ background: "#fff", border: "1px solid #e4e7ec", borderRadius: 10, boxShadow: "0 1px 2px rgba(16,24,40,0.04)", ...style }}>
+      {children}
+    </section>
+  );
+}
+
 function NumberInput({ value, onChange, ...props }) {
   const [draft, setDraft] = useState(String(num(value)));
 
@@ -442,6 +468,7 @@ export default function App() {
   const [clientForm, setClientForm] = useState({ name: "", phone: "", notes: "" });
   const [message, setMessage] = useState("");
   const [syncState, setSyncState] = useState(SHEETS_URL ? "Loading Google Sheet..." : "Local export mode");
+  const [exportOpen, setExportOpen] = useState(false);
   const [exportFilters, setExportFilters] = useState({
     from: today(),
     to: today(),
@@ -486,12 +513,12 @@ export default function App() {
     const due = sales - paid;
     const openingNauloStickUsed = Math.min(num(stock.openingNauloStick), soldNauloStick);
     const preparedNauloStickUsed = Math.max(0, soldNauloStick - openingNauloStickUsed);
-    const openingCigUsed = Math.min(num(stock.openingCig), soldCig);
+    const openingCigUsed = Math.min(cigOpeningPieces(stock), soldCig);
     const preparedCigUsed = Math.max(0, soldCig - openingCigUsed);
     const openingNauloStickRemaining = num(stock.openingNauloStick) - openingNauloStickUsed;
     const preparedNauloStickRemaining = num(stock.nauloStickPrepared) - preparedNauloStickUsed;
-    const openingCigRemaining = num(stock.openingCig) - openingCigUsed;
-    const preparedCigRemaining = num(stock.cigPrepared) - preparedCigUsed;
+    const openingCigRemaining = cigOpeningPieces(stock) - openingCigUsed;
+    const preparedCigRemaining = cigBoughtPieces(stock) - preparedCigUsed;
     return {
       soldNauloStick,
       soldCig,
@@ -506,6 +533,7 @@ export default function App() {
       preparedNauloStickRemaining,
       openingCigRemaining,
       preparedCigRemaining,
+      cigPiecesBought: cigBoughtPieces(stock),
       remainingNauloStick: openingNauloStickRemaining + preparedNauloStickRemaining,
       remainingCig: openingCigRemaining + preparedCigRemaining,
     };
@@ -522,12 +550,12 @@ export default function App() {
       const paid = rows.filter((t) => t.paid).reduce((sum, t) => sum + num(t.amount), 0);
       const openingNauloStickUsed = Math.min(num(row.openingNauloStick), soldNauloStick);
       const preparedNauloStickUsed = Math.max(0, soldNauloStick - openingNauloStickUsed);
-      const openingCigUsed = Math.min(num(row.openingCig), soldCig);
+      const openingCigUsed = Math.min(cigOpeningPieces(row), soldCig);
       const preparedCigUsed = Math.max(0, soldCig - openingCigUsed);
       const openingNauloStickRemaining = num(row.openingNauloStick) - openingNauloStickUsed;
       const preparedNauloStickRemaining = num(row.nauloStickPrepared) - preparedNauloStickUsed;
-      const openingCigRemaining = num(row.openingCig) - openingCigUsed;
-      const preparedCigRemaining = num(row.cigPrepared) - preparedCigUsed;
+      const openingCigRemaining = cigOpeningPieces(row) - openingCigUsed;
+      const preparedCigRemaining = cigBoughtPieces(row) - preparedCigUsed;
       return {
         ...row,
         soldNauloStick,
@@ -540,6 +568,9 @@ export default function App() {
         remainingNauloStick: openingNauloStickRemaining + preparedNauloStickRemaining,
         openingCigRemaining,
         preparedCigRemaining,
+        openingCigPieces: cigOpeningPieces(row),
+        cigPacketsBought: cigBoughtPackets(row),
+        cigPiecesBought: cigBoughtPieces(row),
         remainingCig: openingCigRemaining + preparedCigRemaining,
       };
     });
@@ -635,7 +666,7 @@ export default function App() {
         ...emptyStock(nextDate),
         ...(prev[nextDate] || {}),
         openingNauloStick: num(prev[nextDate]?.openingNauloStick) + Math.max(0, daily.remainingNauloStick),
-        openingCig: num(prev[nextDate]?.openingCig) + Math.max(0, daily.remainingCig),
+        openingCigPieces: cigOpeningPieces(prev[nextDate] || {}) + Math.max(0, daily.remainingCig),
       },
     }));
     setDate(nextDate);
@@ -646,6 +677,9 @@ export default function App() {
         summary: {
           date,
           ...stock,
+          openingCigPieces: cigOpeningPieces(stock),
+          cigPacketsBought: cigBoughtPackets(stock),
+          cigPiecesBought: cigBoughtPieces(stock),
           ...daily,
         },
       });
@@ -690,13 +724,25 @@ export default function App() {
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800;900&display=swap');
         *{box-sizing:border-box}
-        body{margin:0;background:#f3f5f7;color:#101828;font-family:Inter,Segoe UI,system-ui,sans-serif}
+        body{margin:0;background:#f4f6f8;color:#101828;font-family:Inter,Segoe UI,system-ui,sans-serif}
         button:hover{opacity:.86}
         input:focus,select:focus,textarea:focus{outline:2px solid #10182822;border-color:#101828}
         table{border-collapse:collapse;width:100%}
         th{text-align:left;font-size:11px;text-transform:uppercase;color:#667085;padding:10px;border-bottom:1px solid #eaecf0}
         td{padding:11px 10px;border-bottom:1px solid #f0f2f5;font-size:13px;vertical-align:top}
-        @media(max-width:850px){.layout{grid-template-columns:1fr!important}.stats{grid-template-columns:repeat(2,1fr)!important}.wide{overflow-x:auto}.formgrid{grid-template-columns:1fr!important}}
+        .wide{overflow-x:auto}
+        @media(max-width:850px){
+          body{background:#f6f7f9}
+          input,select,textarea{font-size:16px!important}
+          .layout{grid-template-columns:1fr!important}
+          .stats{grid-template-columns:repeat(2,minmax(0,1fr))!important}
+          .formgrid{grid-template-columns:1fr!important}
+          header{align-items:flex-start!important}
+          header > div:last-child{width:100%;display:grid!important;grid-template-columns:1fr 1fr}
+        }
+        @media(max-width:430px){
+          .stats{gap:8px!important}
+        }
       `}</style>
 
       {clientModal && (
@@ -718,11 +764,55 @@ export default function App() {
         </Modal>
       )}
 
-      <div style={{ maxWidth: 1220, margin: "0 auto", padding: 18 }}>
-        <header style={{ display: "flex", justifyContent: "space-between", gap: 16, alignItems: "center", marginBottom: 14, flexWrap: "wrap" }}>
+      {exportOpen && (
+        <Modal title="Export Excel" onClose={() => setExportOpen(false)}>
+          <div style={{ display: "grid", gap: 12 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }} className="formgrid">
+              <Field label="Export from">
+                <input style={inputStyle} type="date" value={exportFilters.from} onChange={(e) => setExportFilters((p) => ({ ...p, from: e.target.value }))} />
+              </Field>
+              <Field label="Export to">
+                <input style={inputStyle} type="date" value={exportFilters.to} onChange={(e) => setExportFilters((p) => ({ ...p, to: e.target.value }))} />
+              </Field>
+            </div>
+            <Field label="Client">
+              <select style={inputStyle} value={exportFilters.clientId} onChange={(e) => setExportFilters((p) => ({ ...p, clientId: e.target.value }))}>
+                <option value="">All clients</option>
+                {clients.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }} className="formgrid">
+              <Field label="Payment">
+                <select style={inputStyle} value={exportFilters.payment} onChange={(e) => setExportFilters((p) => ({ ...p, payment: e.target.value }))}>
+                  <option>All</option>
+                  <option>Paid</option>
+                  <option>Due</option>
+                </select>
+              </Field>
+              <Field label="Record type">
+                <select style={inputStyle} value={exportFilters.recordType} onChange={(e) => setExportFilters((p) => ({ ...p, recordType: e.target.value }))}>
+                  <option>All</option>
+                  <option>Transactions</option>
+                  <option>Daily Summary</option>
+                </select>
+              </Field>
+            </div>
+            <button onClick={exportExcel} style={{ ...buttonStyle, background: "#101828", color: "#fff", padding: 12 }}>
+              Download Excel
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      <div style={{ maxWidth: 1240, margin: "0 auto", padding: "20px 18px 28px" }}>
+        <header style={{ display: "flex", justifyContent: "space-between", gap: 16, alignItems: "center", marginBottom: 16, flexWrap: "wrap" }}>
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <div style={{ width: 38, height: 38, borderRadius: 8, background: "#101828", color: "#fff", display: "grid", placeItems: "center", fontWeight: 900 }}>B</div>
+              <div style={{ width: 40, height: 40, borderRadius: 10, background: "#101828", color: "#fff", display: "grid", placeItems: "center", fontWeight: 900 }}>B</div>
               <div>
                 <h1 style={{ margin: 0, fontSize: 24, letterSpacing: 0 }}>{APP_NAME}</h1>
                 <div style={{ fontSize: 13, color: "#667085" }}>Daily client, stock, due, and payment tracker</div>
@@ -734,7 +824,7 @@ export default function App() {
             <button onClick={saveExcel} style={{ ...buttonStyle, background: "#101828", color: "#fff" }}>
               Save Excel
             </button>
-            <button onClick={exportExcel} style={{ ...buttonStyle, background: "#fff", color: "#101828", border: "1px solid #d5d7db" }}>
+            <button onClick={() => setExportOpen(true)} style={{ ...buttonStyle, background: "#fff", color: "#101828", border: "1px solid #d5d7db" }}>
               Export Excel
             </button>
           </div>
@@ -746,45 +836,7 @@ export default function App() {
           </div>
         )}
 
-        <section style={{ background: "#fff", border: "1px solid #eaecf0", borderRadius: 8, padding: 14, marginBottom: 12 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr) auto", gap: 10, alignItems: "end" }} className="formgrid">
-            <Field label="Export from">
-              <input style={inputStyle} type="date" value={exportFilters.from} onChange={(e) => setExportFilters((p) => ({ ...p, from: e.target.value }))} />
-            </Field>
-            <Field label="Export to">
-              <input style={inputStyle} type="date" value={exportFilters.to} onChange={(e) => setExportFilters((p) => ({ ...p, to: e.target.value }))} />
-            </Field>
-            <Field label="Client">
-              <select style={inputStyle} value={exportFilters.clientId} onChange={(e) => setExportFilters((p) => ({ ...p, clientId: e.target.value }))}>
-                <option value="">All clients</option>
-                {clients.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <Field label="Payment">
-              <select style={inputStyle} value={exportFilters.payment} onChange={(e) => setExportFilters((p) => ({ ...p, payment: e.target.value }))}>
-                <option>All</option>
-                <option>Paid</option>
-                <option>Due</option>
-              </select>
-            </Field>
-            <Field label="Record type">
-              <select style={inputStyle} value={exportFilters.recordType} onChange={(e) => setExportFilters((p) => ({ ...p, recordType: e.target.value }))}>
-                <option>All</option>
-                <option>Transactions</option>
-                <option>Daily Summary</option>
-              </select>
-            </Field>
-            <button onClick={exportExcel} style={{ ...buttonStyle, background: "#f9fafb", color: "#101828", border: "1px solid #d5d7db", height: 40 }}>
-              Download
-            </button>
-          </div>
-        </section>
-
-        <section style={{ background: "#fff", border: "1px solid #eaecf0", borderRadius: 8, padding: 14, marginBottom: 12 }}>
+        <Panel style={{ padding: 14, marginBottom: 12 }}>
           <div style={{ display: "grid", gridTemplateColumns: "180px 1fr auto", gap: 12, alignItems: "end" }} className="formgrid">
             <Field label="Calendar date">
               <input type="date" style={inputStyle} value={date} onChange={(e) => setDate(e.target.value)} />
@@ -797,39 +849,39 @@ export default function App() {
                 <NumberInput style={inputStyle} value={stock.nauloStickPrepared} onChange={(value) => updateStock("nauloStickPrepared", value)} />
               </Field>
               <Field label="Opening Cig">
-                <NumberInput style={inputStyle} value={stock.openingCig} onChange={(value) => updateStock("openingCig", value)} />
+                <NumberInput style={inputStyle} value={cigOpeningPieces(stock)} onChange={(value) => updateStock("openingCigPieces", value)} />
               </Field>
-              <Field label="Prepared Cig">
-                <NumberInput style={inputStyle} value={stock.cigPrepared} onChange={(value) => updateStock("cigPrepared", value)} />
+              <Field label="Cig packets bought">
+                <NumberInput style={inputStyle} value={cigBoughtPackets(stock)} onChange={(value) => updateStock("cigPacketsBought", value)} />
               </Field>
             </div>
             <button onClick={carryForward} style={{ ...buttonStyle, background: "#eef4ff", color: "#3538cd", border: "1px solid #c7d7fe" }}>
               Carry to Next Day
             </button>
           </div>
-        </section>
+        </Panel>
 
         <section className="stats" style={{ display: "grid", gridTemplateColumns: "repeat(6,1fr)", gap: 10, marginBottom: 12 }}>
-          <Stat label="Stick sold" value={daily.soldNauloStick} />
-          <Stat label="Cig sold" value={daily.soldCig} />
+          <Stat label="Daily stick sold" value={daily.soldNauloStick} />
+          <Stat label="Daily cig sold" value={daily.soldCig} />
           <Stat label="Stick carry total" value={daily.remainingNauloStick} tone={daily.remainingNauloStick < 0 ? "bad" : "dark"} />
-          <Stat label="Cig carry total" value={daily.remainingCig} tone={daily.remainingCig < 0 ? "bad" : "dark"} />
+          <Stat label="Cig pieces left" value={daily.remainingCig} tone={daily.remainingCig < 0 ? "bad" : "dark"} />
           <Stat label="Paid" value={money(daily.paid)} tone="good" />
           <Stat label="Due" value={money(daily.due)} tone={daily.due > 0 ? "bad" : "dark"} />
         </section>
 
-        <section style={{ background: "#fff", border: "1px solid #eaecf0", borderRadius: 8, padding: 14, marginBottom: 12 }}>
+        <Panel style={{ padding: 14, marginBottom: 12 }}>
           <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
             <strong>Remaining Stock</strong>
-            <span style={{ fontSize: 12, color: "#667085" }}>Sales consume opening stock first, then prepared stock.</span>
+            <span style={{ fontSize: 12, color: "#667085" }}>Daily sales for {fmtDate(date)} consume opening stock first, then bought/prepared stock.</span>
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 10 }} className="stats">
             <Stat label="Opening stick left" value={daily.openingNauloStickRemaining} tone={daily.openingNauloStickRemaining < 0 ? "bad" : "dark"} />
             <Stat label="Prepared stick left" value={daily.preparedNauloStickRemaining} tone={daily.preparedNauloStickRemaining < 0 ? "bad" : "dark"} />
-            <Stat label="Opening cig left" value={daily.openingCigRemaining} tone={daily.openingCigRemaining < 0 ? "bad" : "dark"} />
-            <Stat label="Prepared cig left" value={daily.preparedCigRemaining} tone={daily.preparedCigRemaining < 0 ? "bad" : "dark"} />
+            <Stat label="Opening cig pieces left" value={daily.openingCigRemaining} tone={daily.openingCigRemaining < 0 ? "bad" : "dark"} />
+            <Stat label="Bought cig pieces left" value={daily.preparedCigRemaining} tone={daily.preparedCigRemaining < 0 ? "bad" : "dark"} />
           </div>
-        </section>
+        </Panel>
 
         <main className="layout" style={{ display: "grid", gridTemplateColumns: "360px 1fr", gap: 12, alignItems: "start" }}>
           <section style={{ background: "#fff", border: "1px solid #eaecf0", borderRadius: 8, padding: 14 }}>
@@ -925,7 +977,7 @@ export default function App() {
                           </td>
                           <td>
                             {t.nauloStick} Naulo Stick<br />
-                            {t.cig} Cig
+                            {t.cig} Cig pieces
                           </td>
                           <td>
                             <strong>{money(t.amount)}</strong>
@@ -993,7 +1045,7 @@ export default function App() {
                     <strong>{daily.remainingNauloStick}</strong>
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between" }}>
-                    <span>Cig left</span>
+                    <span>Cig pieces left</span>
                     <strong>{daily.remainingCig}</strong>
                   </div>
                 </div>
