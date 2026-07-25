@@ -9,11 +9,11 @@ npm install
 npm run dev
 ```
 
-## Export/Import
+## Save And Export
 
-Use **Load Excel** to load the workbook you use for daily records. After a workbook is loaded, **Save Excel** downloads an updated copy using that same filename. **Save As New** downloads a date-stamped workbook such as `buki_tracker_2026-07-25.xlsx`.
+Use **Save Excel** to sync the current local records into the configured Google Sheet. The Google Sheet script writes into one tab named `Buki Records` and updates existing rows by a stable unique key.
 
-Browsers do not allow a website to silently overwrite an arbitrary local Excel file for safety reasons, so saving still happens through the browser's download flow. If your browser asks what to do with the file, choose replace/overwrite to keep one workbook.
+Use **Export Excel** or **Download** to download an `.xlsx` file from the selected date, client, payment, and record-type filters.
 
 The app also saves automatically in the current browser with `localStorage`.
 
@@ -33,4 +33,4 @@ VITE_GOOGLE_SHEET_WEBAPP_URL=https://script.google.com/macros/s/YOUR_DEPLOYMENT_
 
 Then redeploy the app.
 
-The script writes all cloud records into one tab named `Buki Records`.
+The script writes all cloud records into one tab named `Buki Records`. It may remove extra blank tabs, but it does not delete non-empty old tabs.

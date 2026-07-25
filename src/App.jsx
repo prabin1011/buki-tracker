@@ -40,10 +40,6 @@ function normalizeName(name) {
   return String(name || "").trim().toLowerCase().replace(/\s+/g, " ");
 }
 
-function normalizePhone(phone) {
-  return String(phone || "").replace(/\D/g, "");
-}
-
 function normalizeExcelDate(value) {
   if (!value) return today();
   if (typeof value === "number") {
@@ -199,6 +195,33 @@ function buildWorkbook(clients, transactions, stockRows) {
   return wb;
 }
 
+function buildFilteredWorkbook(clients, transactions, stockRows, filters) {
+  const matchesDate = (date) => {
+    if (filters.from && date < filters.from) return false;
+    if (filters.to && date > filters.to) return false;
+    return true;
+  };
+  const matchesClient = (clientId, clientName = "") => {
+    if (!filters.clientId) return true;
+    return clientId === filters.clientId || normalizeName(clientName) === normalizeName(filters.clientId);
+  };
+  const filteredTransactions = transactions.filter(
+    (t) =>
+      matchesDate(t.date) &&
+      matchesClient(t.clientId, t.clientName) &&
+      (filters.payment === "All" || (filters.payment === "Paid" ? t.paid : !t.paid))
+  );
+  const filteredStockRows = stockRows.filter((row) => matchesDate(row.date));
+  const clientIds = new Set(filteredTransactions.map((t) => t.clientId));
+  const filteredClients = filters.recordType === "Daily Summary"
+    ? []
+    : clients.filter((c) => !filters.clientId || clientIds.has(c.id) || c.id === filters.clientId);
+
+  if (filters.recordType === "Transactions") return buildWorkbook(filteredClients, filteredTransactions, []);
+  if (filters.recordType === "Daily Summary") return buildWorkbook([], [], filteredStockRows);
+  return buildWorkbook(filteredClients, filteredTransactions, filteredStockRows);
+}
+
 async function syncToGoogleSheet(payload) {
   if (!SHEETS_URL) return { skipped: true };
   const response = await fetch(SHEETS_URL, {
@@ -208,6 +231,102 @@ async function syncToGoogleSheet(payload) {
     body: JSON.stringify(payload),
   });
   return { skipped: false, response };
+}
+
+function loadGoogleSheetRecords(url) {
+  return new Promise((resolve, reject) => {
+    const callback = `bukiSheetCallback_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const script = document.createElement("script");
+    const separator = url.includes("?") ? "&" : "?";
+    const timer = window.setTimeout(() => {
+      cleanup();
+      reject(new Error("Google Sheet load timed out"));
+    }, 15000);
+
+    function cleanup() {
+      window.clearTimeout(timer);
+      delete window[callback];
+      script.remove();
+    }
+
+    window[callback] = (data) => {
+      cleanup();
+      resolve(data.records || []);
+    };
+
+    script.onerror = () => {
+      cleanup();
+      reject(new Error("Could not load Google Sheet"));
+    };
+
+    script.src = `${url}${separator}callback=${callback}`;
+    document.body.appendChild(script);
+  });
+}
+
+function recordsToState(records) {
+  const clientMap = new Map();
+  const transactionMap = new Map();
+  const stockMap = {};
+
+  records.forEach((row) => {
+    const type = row["Record Type"];
+    if (type === "Client") {
+      const id = row["Client ID"] || row.ID || uid();
+      clientMap.set(id, {
+        id,
+        name: row.Client || "",
+        phone: row.Phone || "",
+        notes: row.Notes || "",
+        joined: normalizeExcelDate(row.Date),
+      });
+    }
+  });
+
+  records.forEach((row) => {
+    const type = row["Record Type"];
+    if (type === "Transaction") {
+      const clientId = row["Client ID"] || "";
+      if (clientId && !clientMap.has(clientId) && row.Client) {
+        clientMap.set(clientId, { id: clientId, name: row.Client, phone: "", notes: "", joined: normalizeExcelDate(row.Date) });
+      }
+      const id = row.ID || uid();
+      transactionMap.set(id, {
+        id,
+        date: normalizeExcelDate(row.Date),
+        clientId,
+        clientName: row.Client || clientMap.get(clientId)?.name || "",
+        nauloStick: num(row["Naulo Stick"]),
+        cig: num(row.Cig),
+        nauloStickPrice: num(row["Naulo Stick Price"]) || PRODUCTS[0].defaultPrice,
+        cigPrice: num(row["Cig Price"]) || PRODUCTS[1].defaultPrice,
+        amount:
+          num(row.Amount) ||
+          num(row["Naulo Stick"]) * (num(row["Naulo Stick Price"]) || PRODUCTS[0].defaultPrice) +
+            num(row.Cig) * (num(row["Cig Price"]) || PRODUCTS[1].defaultPrice),
+        paid: row["Payment Status"] !== "Due",
+        method: row["Payment Method"] || "",
+        notes: row.Notes || "",
+      });
+    }
+    if (type === "Daily Summary") {
+      const date = normalizeExcelDate(row.Date);
+      stockMap[date] = {
+        date,
+        openingNauloStick: num(row["Opening Naulo Stick"]),
+        nauloStickPrepared: num(row["Prepared Naulo Stick"]),
+        openingCig: num(row["Opening Cig"]),
+        cigPrepared: num(row["Prepared Cig"]),
+        notes: row.Notes || "",
+      };
+    }
+  });
+
+  return {
+    clients: Array.from(clientMap.values()).filter((c) => c.name),
+    transactions: Array.from(transactionMap.values()).sort((a, b) => b.date.localeCompare(a.date)),
+    stockByDate: stockMap,
+  };
 }
 
 const inputStyle = {
@@ -322,14 +441,40 @@ export default function App() {
   const [txForm, setTxForm] = useState(defaultForm());
   const [clientForm, setClientForm] = useState({ name: "", phone: "", notes: "" });
   const [message, setMessage] = useState("");
-  const [syncState, setSyncState] = useState(SHEETS_URL ? "Google Sheets sync on" : "Excel/local mode");
-  const [loadedFileName, setLoadedFileName] = useState("");
+  const [syncState, setSyncState] = useState(SHEETS_URL ? "Loading Google Sheet..." : "Local export mode");
+  const [exportFilters, setExportFilters] = useState({
+    from: today(),
+    to: today(),
+    clientId: "",
+    payment: "All",
+    recordType: "All",
+  });
 
   const stock = stockByDate[date] || emptyStock(date);
 
   useEffect(() => {
     localStorage.setItem(STORE_KEY, JSON.stringify({ clients, transactions, stockByDate }));
   }, [clients, transactions, stockByDate]);
+
+  useEffect(() => {
+    if (!SHEETS_URL) return;
+    let cancelled = false;
+    loadGoogleSheetRecords(SHEETS_URL)
+      .then((records) => {
+        if (cancelled) return;
+        const loaded = recordsToState(records);
+        setClients(loaded.clients);
+        setTransactions(loaded.transactions);
+        setStockByDate(loaded.stockByDate);
+        setSyncState(`Google Sheet connected - ${records.length} rows loaded`);
+      })
+      .catch(() => {
+        if (!cancelled) setSyncState("Google Sheet load failed - local copy active");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const dayTransactions = useMemo(() => transactions.filter((t) => t.date === date), [transactions, date]);
 
@@ -420,7 +565,7 @@ export default function App() {
     setMessage(`${client.name} added.`);
     try {
       const result = await syncToGoogleSheet({ type: "client", client });
-      setSyncState(result.skipped ? "Excel/local mode" : "Client synced to Google Sheets");
+      setSyncState(result.skipped ? "Local export mode" : "Client synced to Google Sheet");
     } catch {
       setSyncState("Google Sheets sync failed");
     }
@@ -458,16 +603,26 @@ export default function App() {
     setMessage("Transaction recorded.");
     try {
       const result = await syncToGoogleSheet({ type: "transaction", transaction: record });
-      setSyncState(result.skipped ? "Excel/local mode" : "Transaction synced to Google Sheets");
+      setSyncState(result.skipped ? "Local export mode" : "Transaction synced to Google Sheet");
     } catch {
       setSyncState("Google Sheets sync failed");
     }
   }
 
   function togglePaid(id) {
+    let updatedTransaction = null;
     setTransactions((prev) =>
-      prev.map((t) => (t.id === id ? { ...t, paid: !t.paid, method: !t.paid ? PAYMENT_METHODS[0] : "" } : t))
+      prev.map((t) => {
+        if (t.id !== id) return t;
+        updatedTransaction = { ...t, paid: !t.paid, method: !t.paid ? PAYMENT_METHODS[0] : "" };
+        return updatedTransaction;
+      })
     );
+    if (updatedTransaction) {
+      syncToGoogleSheet({ type: "transaction", transaction: updatedTransaction })
+        .then((result) => setSyncState(result.skipped ? "Local export mode" : "Payment status synced to Google Sheet"))
+        .catch(() => setSyncState("Google Sheet sync failed"));
+    }
   }
 
   async function carryForward() {
@@ -494,115 +649,40 @@ export default function App() {
           ...daily,
         },
       });
-      setSyncState(result.skipped ? "Excel/local mode" : "Daily summary synced to Google Sheets");
+      setSyncState(result.skipped ? "Local export mode" : "Daily summary synced to Google Sheet");
     } catch {
       setSyncState("Google Sheets sync failed");
     }
   }
 
-  function exportExcel(saveAsNew = false) {
-    const fallback = "buki_tracker.xlsx";
-    const fileName = saveAsNew ? `buki_tracker_${date}.xlsx` : loadedFileName || fallback;
-    XLSX.writeFile(buildWorkbook(clients, transactions, allStockRows), fileName);
-    setMessage(saveAsNew ? "New Excel file exported." : `Excel saved as ${fileName}.`);
+  async function saveExcel() {
+    if (!SHEETS_URL) {
+      setMessage("Google Sheet URL is not configured. Use Export Excel to download a file.");
+      return;
+    }
+    setSyncState("Saving to Google Sheet...");
+    try {
+      for (const client of clients) {
+        await syncToGoogleSheet({ type: "client", client });
+      }
+      for (const transaction of transactions) {
+        await syncToGoogleSheet({ type: "transaction", transaction });
+      }
+      for (const summary of allStockRows) {
+        await syncToGoogleSheet({ type: "daily_summary", summary });
+      }
+      setSyncState("Google Sheet saved");
+      setMessage("Saved to the same Google Sheet.");
+    } catch {
+      setSyncState("Google Sheet save failed");
+      setMessage("Could not save to Google Sheet. Export Excel still works.");
+    }
   }
 
-  function importExcel(event) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      try {
-        const wb = XLSX.read(e.target.result, { type: "array", cellDates: false });
-        const clientRows = XLSX.utils.sheet_to_json(wb.Sheets.Clients || {});
-        const txRows = XLSX.utils.sheet_to_json(wb.Sheets.Transactions || {});
-        const dailyRows = XLSX.utils.sheet_to_json(wb.Sheets["Daily Summary"] || {});
-        const nextStock = {};
-        dailyRows.forEach((r) => {
-          if (!r.Date) return;
-          const normalizedDate = normalizeExcelDate(r.Date);
-          nextStock[normalizedDate] = {
-            date: normalizedDate,
-            openingNauloStick: num(r["Opening Naulo Stick"]),
-            nauloStickPrepared: num(r["Prepared Naulo Stick"]),
-            openingCig: num(r["Opening Cig"]),
-            cigPrepared: num(r["Prepared Cig"]),
-            notes: r.Notes || "",
-          };
-        });
-        const nextClients = [];
-        const idMap = new Map();
-        const phoneMap = new Map();
-        const nameMap = new Map();
-        clientRows.forEach((r) => {
-          const incoming = {
-            id: r.ID || uid(),
-            name: String(r.Name || "").trim(),
-            phone: String(r.Phone || "").trim(),
-            notes: r.Notes || "",
-            joined: normalizeExcelDate(r.Joined),
-          };
-          if (!incoming.name) return;
-          const phoneKey = normalizePhone(incoming.phone);
-          const nameKey = normalizeName(incoming.name);
-          const existing =
-            (incoming.id && idMap.get(incoming.id)) ||
-            (phoneKey && phoneMap.get(phoneKey)) ||
-            (nameKey && nameMap.get(nameKey));
-          if (existing) {
-            existing.phone = existing.phone || incoming.phone;
-            existing.notes = existing.notes || incoming.notes;
-            idMap.set(incoming.id, existing);
-            return;
-          }
-          nextClients.push(incoming);
-          idMap.set(incoming.id, incoming);
-          if (phoneKey) phoneMap.set(phoneKey, incoming);
-          if (nameKey) nameMap.set(nameKey, incoming);
-        });
-        const mappedTransactions = txRows.map((r) => {
-          const rawClientId = r.ClientID || "";
-          const rawClientName = String(r.Client || "").trim();
-          const matched =
-            (rawClientId && idMap.get(rawClientId)) ||
-            (rawClientName && nameMap.get(normalizeName(rawClientName)));
-          let client = matched;
-          if (!client && rawClientName) {
-            client = { id: uid(), name: rawClientName, phone: "", notes: "", joined: normalizeExcelDate(r.Date) };
-            nextClients.push(client);
-            idMap.set(client.id, client);
-            nameMap.set(normalizeName(client.name), client);
-          }
-          return {
-            id: r.ID || uid(),
-            date: normalizeExcelDate(r.Date),
-            clientId: client?.id || rawClientId,
-            clientName: client?.name || rawClientName,
-            nauloStick: num(r["Naulo Stick"]),
-            cig: num(r.Cig),
-            nauloStickPrice: num(r["Naulo Stick Price"]) || PRODUCTS[0].defaultPrice,
-            cigPrice: num(r["Cig Price"]) || PRODUCTS[1].defaultPrice,
-            amount:
-              num(r.Amount) ||
-              num(r["Naulo Stick"]) * (num(r["Naulo Stick Price"]) || PRODUCTS[0].defaultPrice) +
-                num(r.Cig) * (num(r["Cig Price"]) || PRODUCTS[1].defaultPrice),
-            paid: r["Payment Status"] !== "Due",
-            method: r["Payment Method"] || "",
-            notes: r.Notes || "",
-          };
-        });
-        setClients(nextClients);
-        setTransactions(mappedTransactions);
-        setStockByDate(nextStock);
-        setLoadedFileName(file.name || "buki_tracker.xlsx");
-        setMessage(`${file.name || "Excel file"} loaded. Save Excel will use the same filename.`);
-      } catch {
-        setMessage("Could not import that Excel file.");
-      } finally {
-        event.target.value = "";
-      }
-    };
-    reader.readAsArrayBuffer(file);
+  function exportExcel() {
+    const fileName = `buki_tracker_export_${exportFilters.from || "all"}_to_${exportFilters.to || "all"}.xlsx`;
+    XLSX.writeFile(buildFilteredWorkbook(clients, transactions, allStockRows, exportFilters), fileName);
+    setMessage(`Exported ${fileName}.`);
   }
 
   return (
@@ -647,20 +727,15 @@ export default function App() {
                 <h1 style={{ margin: 0, fontSize: 24, letterSpacing: 0 }}>{APP_NAME}</h1>
                 <div style={{ fontSize: 13, color: "#667085" }}>Daily client, stock, due, and payment tracker</div>
                 <div style={{ fontSize: 12, color: SHEETS_URL ? "#067647" : "#667085", marginTop: 2 }}>{syncState}</div>
-                {loadedFileName && <div style={{ fontSize: 12, color: "#667085", marginTop: 2 }}>Loaded workbook: {loadedFileName}</div>}
               </div>
             </div>
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <label style={{ ...buttonStyle, background: "#fff", border: "1px solid #d5d7db", color: "#101828" }}>
-              Load Excel
-              <input type="file" accept=".xlsx" onChange={importExcel} style={{ display: "none" }} />
-            </label>
-            <button onClick={() => exportExcel(false)} style={{ ...buttonStyle, background: "#101828", color: "#fff" }}>
+            <button onClick={saveExcel} style={{ ...buttonStyle, background: "#101828", color: "#fff" }}>
               Save Excel
             </button>
-            <button onClick={() => exportExcel(true)} style={{ ...buttonStyle, background: "#fff", color: "#101828", border: "1px solid #d5d7db" }}>
-              Save As New
+            <button onClick={exportExcel} style={{ ...buttonStyle, background: "#fff", color: "#101828", border: "1px solid #d5d7db" }}>
+              Export Excel
             </button>
           </div>
         </header>
@@ -670,6 +745,44 @@ export default function App() {
             {message}
           </div>
         )}
+
+        <section style={{ background: "#fff", border: "1px solid #eaecf0", borderRadius: 8, padding: 14, marginBottom: 12 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr) auto", gap: 10, alignItems: "end" }} className="formgrid">
+            <Field label="Export from">
+              <input style={inputStyle} type="date" value={exportFilters.from} onChange={(e) => setExportFilters((p) => ({ ...p, from: e.target.value }))} />
+            </Field>
+            <Field label="Export to">
+              <input style={inputStyle} type="date" value={exportFilters.to} onChange={(e) => setExportFilters((p) => ({ ...p, to: e.target.value }))} />
+            </Field>
+            <Field label="Client">
+              <select style={inputStyle} value={exportFilters.clientId} onChange={(e) => setExportFilters((p) => ({ ...p, clientId: e.target.value }))}>
+                <option value="">All clients</option>
+                {clients.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Payment">
+              <select style={inputStyle} value={exportFilters.payment} onChange={(e) => setExportFilters((p) => ({ ...p, payment: e.target.value }))}>
+                <option>All</option>
+                <option>Paid</option>
+                <option>Due</option>
+              </select>
+            </Field>
+            <Field label="Record type">
+              <select style={inputStyle} value={exportFilters.recordType} onChange={(e) => setExportFilters((p) => ({ ...p, recordType: e.target.value }))}>
+                <option>All</option>
+                <option>Transactions</option>
+                <option>Daily Summary</option>
+              </select>
+            </Field>
+            <button onClick={exportExcel} style={{ ...buttonStyle, background: "#f9fafb", color: "#101828", border: "1px solid #d5d7db", height: 40 }}>
+              Download
+            </button>
+          </div>
+        </section>
 
         <section style={{ background: "#fff", border: "1px solid #eaecf0", borderRadius: 8, padding: 14, marginBottom: 12 }}>
           <div style={{ display: "grid", gridTemplateColumns: "180px 1fr auto", gap: 12, alignItems: "end" }} className="formgrid">
